@@ -9,7 +9,7 @@ from db.models.reservation import Reservation, ReservationItem
 from db.models.sale import Order, OrderItem
 
 
-def test_delete_product_removes_related_records():
+def test_delete_product_preserves_related_records():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
 
@@ -31,8 +31,9 @@ def test_delete_product_removes_related_records():
         deleted = delete_product(db=db, product_id=product.id, current_user=object())
 
         assert deleted.id == product.id
-        assert db.query(Product).filter(Product.id == product.id).count() == 0
-        assert db.query(ProductVariant).filter(ProductVariant.id == variant.id).count() == 0
-        assert db.query(Inventory).filter(Inventory.variant_id == variant.id).count() == 0
-        assert db.query(OrderItem).filter(OrderItem.variant_id == variant.id).count() == 0
-        assert db.query(ReservationItem).filter(ReservationItem.variant_id == variant.id).count() == 0
+        assert not deleted.is_active
+        assert db.query(Product).filter(Product.id == product.id).count() == 1
+        assert db.query(ProductVariant).filter(ProductVariant.id == variant.id).count() == 1
+        assert db.query(Inventory).filter(Inventory.variant_id == variant.id).count() == 1
+        assert db.query(OrderItem).filter(OrderItem.variant_id == variant.id).count() == 1
+        assert db.query(ReservationItem).filter(ReservationItem.variant_id == variant.id).count() == 1

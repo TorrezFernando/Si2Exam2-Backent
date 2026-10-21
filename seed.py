@@ -94,10 +94,62 @@ def seed():
     db = SessionLocal()
 
     try:
-        # ─── 1. SUCURSALES (Múltiples Tiendas) ──────────────────────────────────
-        print("\n--- 1. Creando Sucursales (Tiendas) ---")
+        # ─── 0. PLANES Y TENANTS (SAAS MULTITENANT) ────────────────────────────
+        print("\n--- 0. Creando Planes de Suscripción y Tenants ---")
+        plan_basic = SubscriptionPlan(
+            name="Plan Básico",
+            code="basic",
+            max_branches=2,
+            has_ai_reports=False,
+            has_offline_sync=True,
+            price=29.99,
+            is_active=True,
+        )
+        plan_pro = SubscriptionPlan(
+            name="Plan Profesional",
+            code="professional",
+            max_branches=10,
+            has_ai_reports=True,
+            has_offline_sync=True,
+            price=99.99,
+            is_active=True,
+        )
+        db.add_all([plan_basic, plan_pro])
+        db.commit()
+        db.refresh(plan_basic)
+        db.refresh(plan_pro)
+        print(f"   [+] Plan: {plan_basic.name} (Max sucursales: {plan_basic.max_branches}, IA: {plan_basic.has_ai_reports})")
+        print(f"   [+] Plan: {plan_pro.name} (Max sucursales: {plan_pro.max_branches}, IA: {plan_pro.has_ai_reports})")
+
+        tenant_a = Tenant(
+            name="Empresa A (FashionStore Corp)",
+            subdomain="fashionstore",
+            is_active=True,
+            exchange_window_days=30,
+        )
+        tenant_b = Tenant(
+            name="Empresa B (Boutique Express)",
+            subdomain="boutique-express",
+            is_active=True,
+            exchange_window_days=15,
+        )
+        db.add_all([tenant_a, tenant_b])
+        db.commit()
+        db.refresh(tenant_a)
+        db.refresh(tenant_b)
+
+        sub_a = Subscription(tenant_id=tenant_a.id, plan_id=plan_pro.id, status="active")
+        sub_b = Subscription(tenant_id=tenant_b.id, plan_id=plan_basic.id, status="active")
+        db.add_all([sub_a, sub_b])
+        db.commit()
+        print(f"   [+] Tenant A (ID {tenant_a.id}): {tenant_a.name} -> Plan: {plan_pro.name}")
+        print(f"   [+] Tenant B (ID {tenant_b.id}): {tenant_b.name} -> Plan: {plan_basic.name}")
+
+        # ─── 1. SUCURSALES EMPRESA A (Múltiples Tiendas) ────────────────────────
+        print("\n--- 1. Creando Sucursales de Empresa A (Tiendas) ---")
         branches_data = [
             {
+                "tenant_id": tenant_a.id,
                 "name": "Comercial Brasil",
                 "address": "Av. Brasil",
                 "phone": "591-70000001",
@@ -105,6 +157,7 @@ def seed():
                 "is_active": True,
             },
             {
+                "tenant_id": tenant_a.id,
                 "name": "Comercial Cañoto",
                 "address": "Av. Cañoto",
                 "phone": "591-70000002",
@@ -112,6 +165,7 @@ def seed():
                 "is_active": True,
             },
             {
+                "tenant_id": tenant_a.id,
                 "name": "Ventura Mall",
                 "address": "4to Anillo Equipetrol",
                 "phone": "591-70000003",
@@ -128,9 +182,10 @@ def seed():
         db.commit()
         for b in branches:
             db.refresh(b)
-            print(f"   [+] Sucursal ID {b.id}: {b.name} ({b.address})")
+            print(f"   [+] Sucursal ID {b.id}: {b.name} ({b.address}) [Tenant: {tenant_a.name}]")
 
         b_centro, b_norte, b_equipetrol = branches
+
 
         # ─── 1.5 ROLES Y PERMISOS (RBAC) ──────────────────────────────────────────
         print("\n--- 1.5 Creando Permisos y Roles (RBAC) ---")
@@ -151,6 +206,8 @@ def seed():
             {"name": "catalog:write", "description": "Gestionar productos y categorías"},
             {"name": "inventory:read", "description": "Ver inventario"},
             {"name": "inventory:write", "description": "Modificar inventario"},
+            # SaaS Global
+            {"name": "saas:manage", "description": "Gestionar empresas y planes SaaS"},
             # Ventas y Reservas
             {"name": "sales:read", "description": "Ver ventas"},
             {"name": "sales:write", "description": "Registrar ventas"},
@@ -169,10 +226,16 @@ def seed():
         # 2. Crear Roles Predeterminados
         roles_data = [
             {
+                "name": "superadmin",
+                "description": "Superadministrador Global SaaS (Acceso Total y Multi-Empresa)",
+                "is_predefined": True,
+                "perms": list(perms_dict.keys()) # Todos los permisos
+            },
+            {
                 "name": "admin",
                 "description": "Administrador del sistema (Acceso Total)",
                 "is_predefined": True,
-                "perms": list(perms_dict.keys()) # Todos los permisos
+                "perms": [p for p in perms_dict.keys() if p != "saas:manage"] # Todos excepto saas global
             },
             {
                 "name": "encargado",
@@ -212,6 +275,21 @@ def seed():
 
         # ─── 2. USUARIOS ───────────────────────────────────────────────────────
         print("\n--- 2. Creando Usuarios ---")
+        # Superadmin Global SaaS (sin tenant_id fijo)
+        superadmin_user = User(
+            email="superadmin@fashionstore.com",
+            hashed_password=security.get_password_hash("SuperAdmin@1234"),
+            full_name="Super Administrador Global SaaS",
+            role_id=roles_dict["superadmin"].id,
+            tenant_id=None,
+            phone="591-77777777",
+            branch_id=None,
+            is_active=True,
+        )
+        db.add(superadmin_user)
+        db.commit()
+        db.refresh(superadmin_user)
+        print(f"   [+] Superadmin Creado: {superadmin_user.email} (Rol: superadmin, Tenant: Global)")
         users_data = [
             # Admin Principal
             {
@@ -309,7 +387,7 @@ def seed():
 
         users_dict = {}
         for u_data in users_data:
-            u = User(**u_data)
+            u = User(tenant_id=tenant_a.id, **u_data)
             db.add(u)
             db.commit()
             db.refresh(u)
@@ -328,12 +406,13 @@ def seed():
 
         categories_dict = {}
         for c_data in categories_data:
-            c = Category(**c_data)
+            c = Category(tenant_id=tenant_a.id, **c_data)
             db.add(c)
             db.commit()
             db.refresh(c)
             categories_dict[c.name] = c
             print(f"   [+] Categoría ID {c.id}: {c.name}")
+
 
         # ─── 4. PRODUCTOS Y VARIANTES ──────────────────────────────────────────
         print("\n--- 4. Creando Catálogo de Productos y Variantes (Tallas/Colores/SKUs) ---")
@@ -442,14 +521,14 @@ def seed():
         all_variants = []
         for p_data in products_data:
             variants_list = p_data.pop("variants")
-            p = Product(**p_data)
+            p = Product(tenant_id=tenant_a.id, **p_data)
             db.add(p)
             db.commit()
             db.refresh(p)
             print(f"   [+] Producto ID {p.id}: {p.name}")
 
             for v_data in variants_list:
-                v = ProductVariant(product_id=p.id, **v_data)
+                v = ProductVariant(tenant_id=tenant_a.id, product_id=p.id, **v_data)
                 db.add(v)
                 db.commit()
                 db.refresh(v)
@@ -466,15 +545,16 @@ def seed():
             stock_norte = 8 + (i * 3) % 12
             stock_equipetrol = 20 + (i * 4) % 15
 
-            inv_c = Inventory(branch_id=b_centro.id, variant_id=variant.id, stock=stock_centro)
-            inv_n = Inventory(branch_id=b_norte.id, variant_id=variant.id, stock=stock_norte)
-            inv_e = Inventory(branch_id=b_equipetrol.id, variant_id=variant.id, stock=stock_equipetrol)
+            inv_c = Inventory(tenant_id=tenant_a.id, branch_id=b_centro.id, variant_id=variant.id, stock=stock_centro)
+            inv_n = Inventory(tenant_id=tenant_a.id, branch_id=b_norte.id, variant_id=variant.id, stock=stock_norte)
+            inv_e = Inventory(tenant_id=tenant_a.id, branch_id=b_equipetrol.id, variant_id=variant.id, stock=stock_equipetrol)
 
             db.add_all([inv_c, inv_n, inv_e])
             inventory_count += 3
 
         db.commit()
         print(f"   [OK] {inventory_count} registros de inventario creados en las 3 sucursales.")
+
 
         # ─── 6. RESERVAS CON SELECCIÓN DE TIENDA ────────────────────────────────
         print("\n--- 6. Creando Reservas (Con Selección de Tienda por Cliente) ---")
@@ -516,13 +596,13 @@ def seed():
 
         for res_data in reservations_data:
             items_data = res_data.pop("items")
-            r = Reservation(**res_data)
+            r = Reservation(tenant_id=tenant_a.id, **res_data)
             db.add(r)
             db.commit()
             db.refresh(r)
 
             for item_d in items_data:
-                ri = ReservationItem(reservation_id=r.id, **item_d)
+                ri = ReservationItem(tenant_id=tenant_a.id, reservation_id=r.id, **item_d)
                 db.add(ri)
 
             db.commit()
@@ -606,22 +686,160 @@ def seed():
 
         for ord_data in orders_data:
             items_data = ord_data.pop("items")
-            o = Order(**ord_data)
+            o = Order(tenant_id=tenant_a.id, **ord_data)
             db.add(o)
             db.commit()
             db.refresh(o)
 
             for item_d in items_data:
-                oi = OrderItem(order_id=o.id, **item_d)
+                oi = OrderItem(tenant_id=tenant_a.id, order_id=o.id, **item_d)
                 db.add(oi)
 
             db.commit()
             print(f"   [+] Orden ID {o.id}: Tipo: {o.order_type.value} | Método: {o.payment_method.value} ({o.card_type or 'N/A'} {o.card_last_four or ''}) | Total: ${o.total_amount}")
 
+        # ─── 8. EMPRESA B (BOUTIQUE EXPRESS - PLAN BÁSICO) -- AISLAMIENTO TOTAL ───
+        print("\n--- 8. Creando Datos Aislados para Empresa B (Plan Básico) ---")
+        # 1 Sucursal para Empresa B (Plan Básico permite máx 2)
+        b_boutique = Branch(
+            tenant_id=tenant_b.id,
+            name="Boutique Central",
+            address="Calle Sucre #123",
+            city="Santa Cruz",
+            phone="591-72200001",
+            image_url="/uploads/branches/centro.svg",
+            is_active=True,
+        )
+        db.add(b_boutique)
+        db.commit()
+        db.refresh(b_boutique)
+        print(f"   [+] Sucursal Empresa B: ID {b_boutique.id} - {b_boutique.name}")
+
+        # Usuarios de Empresa B
+        admin_b = User(
+            email="admin@boutique.com",
+            hashed_password=security.get_password_hash("Admin123!"),
+            full_name="Admin Boutique Express",
+            role_id=roles_dict["admin"].id,
+            tenant_id=tenant_b.id,
+            phone="591-72211111",
+        )
+        cajero_b = User(
+            email="cajero@boutique.com",
+            hashed_password=security.get_password_hash("Cajero123!"),
+            full_name="Cajero Boutique Express",
+            role_id=roles_dict["cajero"].id,
+            branch_id=b_boutique.id,
+            tenant_id=tenant_b.id,
+            phone="591-72222222",
+        )
+        cliente_b = User(
+            email="cliente@boutique.com",
+            hashed_password=security.get_password_hash("Cliente123!"),
+            full_name="Cliente Exclusivo Boutique",
+            role_id=roles_dict["cliente"].id,
+            tenant_id=tenant_b.id,
+            phone="591-72233333",
+        )
+        db.add_all([admin_b, cajero_b, cliente_b])
+        db.commit()
+        db.refresh(admin_b)
+        db.refresh(cajero_b)
+        db.refresh(cliente_b)
+        print(f"   [+] Usuarios Empresa B: {admin_b.email}, {cajero_b.email}, {cliente_b.email}")
+
+        # Categoría y Catálogo propio de Empresa B
+        cat_b = Category(
+            tenant_id=tenant_b.id,
+            name="Moda Exclusiva Boutique",
+            description="Línea de ropa premium exclusiva de Boutique Express",
+            image_url="/uploads/categories/hombre.svg",
+        )
+        db.add(cat_b)
+        db.commit()
+        db.refresh(cat_b)
+
+        prod_b1 = Product(
+            tenant_id=tenant_b.id,
+            name="Blazer Italiano Boutique",
+            description="Blazer de corte entallado en paño italiano.",
+            base_price=350.0,
+            category_id=cat_b.id,
+            season="Otoño 2026",
+            image_url="/uploads/products/chamarra_cuero.svg",
+        )
+        prod_b2 = Product(
+            tenant_id=tenant_b.id,
+            name="Pantalón Casual de Lino",
+            description="Pantalón fresco 100% lino para clima cálido.",
+            base_price=180.0,
+            category_id=cat_b.id,
+            season="Verano 2026",
+            image_url="/uploads/products/jeans_slim.svg",
+        )
+        db.add_all([prod_b1, prod_b2])
+        db.commit()
+        db.refresh(prod_b1)
+        db.refresh(prod_b2)
+
+        v_b1_s = ProductVariant(tenant_id=tenant_b.id, product_id=prod_b1.id, size="M", color="Azul Marino", sku="BOU-BLA-AZUL-M")
+        v_b1_l = ProductVariant(tenant_id=tenant_b.id, product_id=prod_b1.id, size="L", color="Azul Marino", sku="BOU-BLA-AZUL-L")
+        v_b2_32 = ProductVariant(tenant_id=tenant_b.id, product_id=prod_b2.id, size="32", color="Beige", sku="BOU-LIN-BEIGE-32")
+        db.add_all([v_b1_s, v_b1_l, v_b2_32])
+        db.commit()
+        db.refresh(v_b1_s)
+        db.refresh(v_b1_l)
+        db.refresh(v_b2_32)
+
+        # Inventarios de Empresa B en su única sucursal
+        inv_b1 = Inventory(tenant_id=tenant_b.id, branch_id=b_boutique.id, variant_id=v_b1_s.id, stock=12)
+        inv_b2 = Inventory(tenant_id=tenant_b.id, branch_id=b_boutique.id, variant_id=v_b1_l.id, stock=8)
+        inv_b3 = Inventory(tenant_id=tenant_b.id, branch_id=b_boutique.id, variant_id=v_b2_32.id, stock=15)
+        db.add_all([inv_b1, inv_b2, inv_b3])
+        db.commit()
+        print(f"   [+] Catálogo Empresa B: 2 productos, 3 variantes, stock asignado a {b_boutique.name}")
+
+        # Venta propia de Empresa B
+        order_b = Order(
+            tenant_id=tenant_b.id,
+            user_id=cliente_b.id,
+            branch_id=b_boutique.id,
+            order_type=OrderTypeEnum.presencial,
+            payment_method=PaymentMethodEnum.efectivo,
+            payment_status=PaymentStatusEnum.paid,
+            total_amount=350.0,
+            is_paid=True,
+            payment_provider="Caja_Boutique",
+            transaction_ref="EF-BOU-0001",
+        )
+        db.add(order_b)
+        db.commit()
+        db.refresh(order_b)
+        db.add(OrderItem(tenant_id=tenant_b.id, order_id=order_b.id, variant_id=v_b1_s.id, quantity=1, unit_price=350.0))
+        db.commit()
+        print(f"   [+] Venta Empresa B: ID {order_b.id} por Bs. {order_b.total_amount}")
+
+        # Reserva propia de Empresa B
+        res_b = Reservation(
+            tenant_id=tenant_b.id,
+            user_id=cliente_b.id,
+            branch_id=b_boutique.id,
+            status=ReservationStatus.pending,
+            pickup_date=datetime.now() + timedelta(days=2),
+            notes="Reserva exclusiva para cliente Boutique.",
+        )
+        db.add(res_b)
+        db.commit()
+        db.refresh(res_b)
+        db.add(ReservationItem(tenant_id=tenant_b.id, reservation_id=res_b.id, variant_id=v_b2_32.id, quantity=1, unit_price=180.0))
+        db.commit()
+        print(f"   [+] Reserva Empresa B: ID {res_b.id} en {b_boutique.name}")
+
         print()
         print(sep)
-        print("  ¡Poblamiento de Base de Datos completado con éxito!")
+        print("  ¡Poblamiento Multitenant (Empresa A Profesional + Empresa B Básico) completado con éxito!")
         print(sep)
+
 
     except Exception as e:
         db.rollback()

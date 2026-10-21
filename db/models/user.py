@@ -22,6 +22,9 @@ class User(Base):
     full_name = Column(String, nullable=True)
     phone = Column(String, nullable=True)
 
+    # Tenant / Multitenancy
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+
     # Nuevo sistema RBAC
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=True) # Todos deberían tener rol, pero nullable en migración
 
@@ -32,6 +35,9 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+    # Relación con Tenant
+    tenant = relationship("Tenant", back_populates="users")
+
     # Relación con Branch
     branch = relationship("Branch", foreign_keys=[branch_id])
     
@@ -40,4 +46,5 @@ class User(Base):
     
     # Permisos individuales que sobreescriben los del rol
     user_permissions = relationship("UserPermission")
+
 

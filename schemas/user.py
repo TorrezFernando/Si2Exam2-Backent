@@ -10,6 +10,8 @@ class UserBase(BaseModel):
     email: EmailStr
     full_name: Optional[str] = None
     phone: Optional[str] = None
+    tenant_id: Optional[int] = None
+
 
 
 # ─── Registro público (CU-01) ─────────────────────────────────────────────────
@@ -96,8 +98,14 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     role: Optional[str] = None # Role name
+    tenant_id: Optional[int] = None
+    plan_code: Optional[str] = None
 
 
 class TokenPayload(BaseModel):
     sub: Optional[str] = None   # user_id como string
     role: Optional[str] = None
+    tenant_id: Optional[int] = None
+    plan_code: Optional[str] = None
+    plan_id: Optional[int] = None
+

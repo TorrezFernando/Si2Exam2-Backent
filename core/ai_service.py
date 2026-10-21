@@ -93,7 +93,7 @@ Rules: Preserve the person's face, hair, body shape exactly. Only change the clo
     for key in api_keys:
         try:
             client = genai.Client(api_key=key)
-            response = client.models.generate_content(
+            response = await asyncio.to_thread(client.models.generate_content,
                 model=settings.GEMINI_MODEL,
                 contents=[
                     prompt,
@@ -144,8 +144,8 @@ Return ONLY a valid JSON array of integer IDs. Example: [1, 5, 12, 3]"""
     for key in api_keys:
         try:
             client = genai.Client(api_key=key)
-            response = client.models.generate_content(
-                model=settings.GEMINI_MODEL,
+            response = await asyncio.to_thread(client.models.generate_content,
+                model=settings.GEMINI_TEXT_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",

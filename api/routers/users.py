@@ -36,6 +36,8 @@ def list_users(
     is_active: Optional[bool] = None,
 ) -> Any:
     query = db.query(User).options(joinedload(User.role), joinedload(User.user_permissions))
+    if current_user.tenant_id is not None:
+        query = query.filter(User.tenant_id == current_user.tenant_id)
 
     if role_id is not None:
         query = query.filter(User.role_id == role_id)
@@ -64,15 +66,21 @@ def create_user_by_admin(
     if not role:
         raise HTTPException(status_code=404, detail="Rol no encontrado.")
 
-    # Logica simple para obligar branch a encargados/cajeros (basado en nombre temporalmente, aunque deberia ser mas generico)
+    # Logica simple para obligar branch a encargados/cajeros
     if role.name in ("cajero", "encargado") and not user_in.branch_id:
         raise HTTPException(status_code=422, detail="Roles operativos requieren branch_id.")
+
+    if user_in.branch_id:
+        branch = db.query(Branch).filter(Branch.id == user_in.branch_id).first()
+        if not branch or (current_user.tenant_id and branch.tenant_id != current_user.tenant_id):
+            raise HTTPException(status_code=400, detail="Sucursal no válida o no pertenece a tu empresa.")
 
     new_user = User(
         email=user_in.email,
         hashed_password=security.get_password_hash(user_in.password),
         full_name=user_in.full_name,
         phone=user_in.phone,
+        tenant_id=current_user.tenant_id,
         role_id=user_in.role_id,
         branch_id=user_in.branch_id,
     )
@@ -80,7 +88,7 @@ def create_user_by_admin(
     db.commit()
     db.refresh(new_user)
 
-    log_audit(db, current_user.id, "CREATE", "USER", str(new_user.id), {"email": new_user.email})
+    log_audit(db, current_user.id, "CREATE", "USER", str(new_user.id), {"email": new_user.email}, tenant_id=current_user.tenant_id)
 
     return new_user
 
@@ -94,7 +102,10 @@ def get_user(
     current_user: User = Depends(require_permission("users:read")),
     user_id: int,
 ) -> Any:
-    user = db.query(User).options(joinedload(User.role), joinedload(User.user_permissions)).filter(User.id == user_id).first()
+    query = db.query(User).options(joinedload(User.role), joinedload(User.user_permissions)).filter(User.id == user_id)
+    if current_user.tenant_id is not None:
+        query = query.filter(User.tenant_id == current_user.tenant_id)
+    user = query.first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
     return user
@@ -110,7 +121,10 @@ def update_user(
     user_id: int,
     user_in: UserUpdate,
 ) -> Any:
-    user = db.query(User).filter(User.id == user_id).first()
+    query = db.query(User).filter(User.id == user_id)
+    if current_user.tenant_id is not None:
+        query = query.filter(User.tenant_id == current_user.tenant_id)
+    user = query.first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
 
@@ -121,6 +135,7 @@ def update_user(
             raise HTTPException(status_code=400, detail="No puedes quitarle el rol al último administrador.")
 
     update_data = user_in.model_dump(exclude_unset=True)
+    update_data.pop("tenant_id", None)
     old_values = {k: getattr(user, k) for k in update_data.keys()}
 
     for field, value in update_data.items():
@@ -129,10 +144,11 @@ def update_user(
     db.commit()
     db.refresh(user)
 
-    log_audit(db, current_user.id, "UPDATE", "USER", str(user.id), {"old": old_values, "new": update_data})
+    log_audit(db, current_user.id, "UPDATE", "USER", str(user.id), {"old": old_values, "new": update_data}, tenant_id=current_user.tenant_id)
 
     # Recargar con relaciones
     return db.query(User).options(joinedload(User.role)).filter(User.id == user_id).first()
+
 
 
 # ─── GESTIONAR PERMISOS INDIVIDUALES DE USUARIO ──────────────────────────────

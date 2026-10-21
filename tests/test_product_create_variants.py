@@ -6,6 +6,17 @@ from db.models.branch import Branch, Inventory
 from db.models.product import Product, ProductVariant
 from api.routers.products import create_product, update_product
 from schemas.product import ProductCreate, ProductUpdate
+from db.models import User, Role, Permission
+
+
+def admin(db):
+    user = db.query(User).first()
+    if user:
+        return user
+    user = User(email='admin@example.com', hashed_password='unused', role=Role(name='admin', permissions=[Permission(name='branches:write')]))
+    db.add(user)
+    db.commit()
+    return user
 
 
 def test_create_product_with_variants_and_inventory():
@@ -30,7 +41,7 @@ def test_create_product_with_variants_and_inventory():
             ],
         )
 
-        created = create_product(db=db, product_in=payload, current_user=object())
+        created = create_product(db=db, product_in=payload, current_user=admin(db))
 
         assert created.id is not None
         assert db.query(ProductVariant).count() == 2
@@ -59,7 +70,7 @@ def test_update_product_variant_quantity_and_size():
             ],
         )
 
-        created = create_product(db=db, product_in=payload, current_user=object())
+        created = create_product(db=db, product_in=payload, current_user=admin(db))
         variant = db.query(ProductVariant).filter(ProductVariant.product_id == created.id).one()
 
         updated = update_product(
@@ -78,7 +89,7 @@ def test_update_product_variant_quantity_and_size():
                     }
                 ],
             ),
-            current_user=object(),
+            current_user=admin(db),
         )
 
         assert updated.id == created.id

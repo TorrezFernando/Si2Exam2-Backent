@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from api.deps import get_db, require_permission, get_current_active_user, get_current_user_optional
+from api.deps import get_db, require_permission, get_current_active_user, get_current_user_optional, get_user_permissions
 from db.models.branch import Branch, Inventory
 from db.models.product import Product, Category, ProductVariant
 from db.models.user import User
@@ -16,6 +16,8 @@ from schemas.product import (
     Category as CategorySchema
 )
 from core.ai_service import generate_recommendations
+from core.commerce import check_branch
+from db.models.operations import Supplier, Season, Collection, InventoryMovement
 
 router = APIRouter()
 
@@ -39,7 +41,7 @@ def list_products(
     limit: int = Query(50, ge=1, le=100)
 ) -> Any:
     """Lista productos (Catálogo). Accesible públicamente o requiere auth según diseño."""
-    query = db.query(Product)
+    query = db.query(Product).filter(Product.is_active.is_(True))
     
     if category_id is not None:
         query = query.filter(Product.category_id == category_id)
@@ -60,6 +62,7 @@ def search_products(
     pattern = f"%{q}%"
     results = (
         db.query(Product)
+        .filter(Product.is_active.is_(True))
         .filter(
             or_(
                 Product.name.ilike(pattern),
@@ -82,7 +85,7 @@ async def get_recommended_products(
     pref = db.query(UserPreference).filter(UserPreference.user_id == current_user.id).first()
     
     # Obtener todos los productos (idealmente solo los activos o en stock)
-    all_products = db.query(Product).all()
+    all_products = db.query(Product).filter(Product.is_active.is_(True)).all()
     if not all_products:
         return []
         
@@ -148,7 +151,7 @@ def interact_with_product(
 ) -> Any:
     """Registra una interacción (vista) con un producto para mejorar las recomendaciones."""
     product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
         
     cat_name = product.category.name if product.category else "Otros"
@@ -191,7 +194,7 @@ def get_product(
 ) -> Any:
     """Obtiene un producto por su ID."""
     product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return product
 
@@ -227,20 +230,24 @@ def create_product(
         if not category:
             raise HTTPException(status_code=404, detail="Categoría no encontrada")
 
+    validate_references(db, product_in)
     product = Product(
         name=product_in.name,
         description=product_in.description,
         base_price=product_in.base_price,
         category_id=product_in.category_id,
         season=product_in.season,
-        image_url=product_in.image_url
+        image_url=product_in.image_url,
+        garment_image_url=product_in.garment_image_url, garment_type=product_in.garment_type,
+        supplier_id=product_in.supplier_id, season_id=product_in.season_id, collection_id=product_in.collection_id
     )
     db.add(product)
     db.flush()
 
-    # Determinar la sucursal objetivo según el rol o la sucursal enviada
+    # Restrict stock writes using effective permissions and assigned branch.
     target_branch_id = None
-    if current_user.role and current_user.role.name == "encargado" and current_user.branch_id:
+    if "branches:write" not in get_user_permissions(db, current_user):
+        check_branch(db, current_user, current_user.branch_id)
         target_branch_id = current_user.branch_id
     elif product_in.branch_id:
         target_branch_id = product_in.branch_id
@@ -270,13 +277,17 @@ def create_product(
         inv_map = {inv.branch_id: max(int(inv.stock or 0), 0) for inv in (variant_data.inventories or [])}
 
         for branch in active_branches:
-            if branch.id in inv_map:
+            if "branches:write" not in get_user_permissions(db, current_user) and branch.id != current_user.branch_id:
+                stock = 0
+            elif branch.id in inv_map:
                 stock = inv_map[branch.id]
             elif variant_branch_id is not None:
                 stock = quantity if branch.id == variant_branch_id else 0
             else:
                 stock = quantity
             db.add(Inventory(branch_id=branch.id, variant_id=variant.id, stock=stock))
+            if stock:
+                db.add(InventoryMovement(branch_id=branch.id, variant_id=variant.id, quantity=stock, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
 
     db.commit()
     db.refresh(product)
@@ -293,7 +304,7 @@ def update_product(
 ) -> Any:
     """Actualiza un producto (Admin/Encargado)."""
     product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
     if product_in.category_id is not None:
@@ -301,13 +312,16 @@ def update_product(
         if not category:
             raise HTTPException(status_code=404, detail="Categoría no encontrada")
 
+    validate_references(db, product_in)
     update_data = product_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
-        if field == "variants":
+        if field in ("variants", "branch_id"):
             continue
         setattr(product, field, value)
 
-    is_encargado = bool(current_user.role and current_user.role.name == "encargado" and current_user.branch_id)
+    is_encargado = "branches:write" not in get_user_permissions(db, current_user)
+    if is_encargado:
+        check_branch(db, current_user, current_user.branch_id)
     encargado_branch_id = current_user.branch_id if is_encargado else None
 
     if product_in.variants is not None:
@@ -321,7 +335,9 @@ def update_product(
 
             variant = None
             if variant_data.id is not None:
-                variant = db.query(ProductVariant).filter(ProductVariant.id == variant_data.id).first()
+                variant = db.query(ProductVariant).filter(ProductVariant.id == variant_data.id, ProductVariant.product_id == product.id).first()
+                if variant is None:
+                    raise HTTPException(400, "La variante no pertenece al producto")
             if variant is None:
                 variant = (
                     db.query(ProductVariant)
@@ -361,16 +377,17 @@ def update_product(
                 inventory = (
                     db.query(Inventory)
                     .filter(Inventory.branch_id == branch.id, Inventory.variant_id == variant.id)
-                    .first()
+                    .with_for_update().first()
                 )
                 if is_encargado:
                     # Encargado: only update their own branch, leave others untouched
                     if branch.id == encargado_branch_id:
                         stock_value = inv_map.get(branch.id, qty)
                         if inventory:
-                            inventory.stock = stock_value
+                            record_adjustment(db, inventory, stock_value, current_user.id)
                         else:
                             db.add(Inventory(branch_id=branch.id, variant_id=variant.id, stock=stock_value))
+                            db.add(InventoryMovement(branch_id=branch.id, variant_id=variant.id, quantity=stock_value, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
                 else:
                     # Admin: update all branches from inv_map (per-branch values)
                     if branch.id in inv_map:
@@ -381,9 +398,10 @@ def update_product(
                         stock_value = qty
 
                     if inventory:
-                        inventory.stock = stock_value
+                        record_adjustment(db, inventory, stock_value, current_user.id)
                     else:
                         db.add(Inventory(branch_id=branch.id, variant_id=variant.id, stock=stock_value))
+                        db.add(InventoryMovement(branch_id=branch.id, variant_id=variant.id, quantity=stock_value, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
 
     db.commit()
     db.refresh(product)
@@ -398,21 +416,26 @@ def delete_product(
 ) -> Any:
     """Elimina un producto (Admin/Encargado)."""
     product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
+    if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
         
-    from db.models.branch import Inventory
-    from db.models.sale import OrderItem
-    from db.models.reservation import ReservationItem
-
-    variant_ids = [variant.id for variant in product.variants]
-
-    if variant_ids:
-        db.query(Inventory).filter(Inventory.variant_id.in_(variant_ids)).delete(synchronize_session=False)
-        db.query(OrderItem).filter(OrderItem.variant_id.in_(variant_ids)).delete(synchronize_session=False)
-        db.query(ReservationItem).filter(ReservationItem.variant_id.in_(variant_ids)).delete(synchronize_session=False)
-        db.query(ProductVariant).filter(ProductVariant.product_id == product_id).delete(synchronize_session=False)
-
-    db.delete(product)
+    # Preserve purchased/reserved lines and their variant relationships.
+    product.is_active = False
     db.commit()
+    db.refresh(product)
     return product
+
+
+def validate_references(db, payload):
+    for field, model in [('supplier_id', Supplier), ('season_id', Season), ('collection_id', Collection)]:
+        value = getattr(payload, field, None)
+        if value is not None and not db.get(model, value):
+            raise HTTPException(400, f'{field} no existe')
+
+
+def record_adjustment(db, inventory, stock, user_id):
+    delta = stock - inventory.stock
+    if delta:
+        db.add(InventoryMovement(branch_id=inventory.branch_id, variant_id=inventory.variant_id,
+            quantity=delta, kind='adjustment', user_id=user_id, reference='catalog update'))
+        inventory.stock = stock

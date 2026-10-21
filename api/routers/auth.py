@@ -20,7 +20,12 @@ def login_access_token(
     db: Session = Depends(deps.get_db),
     form_data: OAuth2PasswordRequestForm = Depends(),
 ) -> Any:
-    user = db.query(User).options(joinedload(User.role)).filter(User.email == form_data.username).first()
+    user = (
+        db.query(User)
+        .options(joinedload(User.role), joinedload(User.tenant))
+        .filter(User.email == form_data.username)
+        .first()
+    )
     if not user or not security.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -34,17 +39,39 @@ def login_access_token(
 
     role_name = user.role.name if user.role else None
 
+    # Resolver Tenant y Plan de Suscripción activo
+    tenant_id = user.tenant_id
+    plan_code = "enterprise_superadmin" if role_name == "superadmin" else "basic"
+    plan_id = None
+    if user.tenant:
+        if not user.tenant.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="La empresa o tenant asociado a esta cuenta se encuentra inactivo.",
+            )
+        active_sub = user.tenant.active_subscription
+        if active_sub and active_sub.plan:
+            plan_code = active_sub.plan.code
+            plan_id = active_sub.plan.id
+
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.create_access_token(
-        subject=user.id, role=role_name, expires_delta=access_token_expires
+        subject=user.id,
+        role=role_name,
+        expires_delta=access_token_expires,
+        tenant_id=tenant_id,
+        plan_code=plan_code,
+        plan_id=plan_id,
     )
     
-    log_audit(db, user.id, "LOGIN", "AUTH", str(user.id), None)
+    log_audit(db, user.id, "LOGIN", "AUTH", str(user.id), None, tenant_id=tenant_id)
     
     return {
         "access_token": access_token,
         "token_type": "bearer",
         "role": role_name,
+        "tenant_id": tenant_id,
+        "plan_code": plan_code,
     }
 
 
@@ -64,21 +91,30 @@ def register_user(
     cliente_role = db.query(Role).filter(Role.name == "cliente").first()
     if not cliente_role:
         raise HTTPException(status_code=500, detail="Rol 'cliente' no configurado en BD.")
+
+    tenant_id = user_in.tenant_id
+    if not tenant_id:
+        from db.models.tenant import Tenant
+        default_tenant = db.query(Tenant).filter(Tenant.is_active == True).first()
+        if default_tenant:
+            tenant_id = default_tenant.id
         
     user = User(
         email=user_in.email,
         hashed_password=security.get_password_hash(user_in.password),
         full_name=user_in.full_name,
         phone=user_in.phone,
+        tenant_id=tenant_id,
         role_id=cliente_role.id
     )
     db.add(user)
     db.commit()
     db.refresh(user)
     
-    log_audit(db, user.id, "REGISTER", "AUTH", str(user.id), None)
+    log_audit(db, user.id, "REGISTER", "AUTH", str(user.id), None, tenant_id=tenant_id)
     
     return user
+
 
 
 @router.get("/me", response_model=UserSchema)

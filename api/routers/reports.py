@@ -11,7 +11,7 @@ from sqlalchemy import func
 from db.database import get_db
 from db.models.user import User
 from db.models.sale import Order, OrderItem, OrderTypeEnum, PaymentMethodEnum
-from api.deps import get_current_user
+from api.deps import get_current_active_user as get_current_user, get_user_permissions
 
 router = APIRouter()
 
@@ -24,16 +24,19 @@ def get_orders_query(
     order_type: Optional[str] = None,
     payment_method: Optional[str] = None,
 ):
-    if not current_user.role or current_user.role.name not in ["admin", "administrador", "encargado", "supervisor"]:
+    if "sales:read" not in get_user_permissions(db, current_user):
         raise HTTPException(status_code=403, detail="No tienes permisos para ver reportes.")
 
     query = db.query(Order)
+    if current_user.tenant_id is not None:
+        query = query.filter(Order.tenant_id == current_user.tenant_id)
 
     # Restringir a la sucursal del supervisor
-    if current_user.role.name in ["encargado", "supervisor"]:
+    if "branches:write" not in get_user_permissions(db, current_user):
         if not current_user.branch_id:
             raise HTTPException(status_code=403, detail="Supervisor sin sucursal asignada.")
         query = query.filter(Order.branch_id == current_user.branch_id)
+
 
     # Filtros
     if start_date:
@@ -180,10 +183,11 @@ class ReportChatRequest(BaseModel):
 @router.post("/ai-chat")
 def ai_reports_chat(
     req: ReportChatRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     # Validar permisos
-    if not current_user.role or current_user.role.name not in ["admin", "administrador", "encargado", "supervisor"]:
+    if "sales:read" not in get_user_permissions(db, current_user):
         raise HTTPException(status_code=403, detail="No tienes permisos para usar el asistente.")
         
     try:
@@ -191,7 +195,7 @@ def ai_reports_chat(
         from google.genai import types
         
         # Usamos la nueva API key proporcionada por el usuario
-        client = genai.Client(api_key=settings.GEMINI_API_KEY_3)
+        client = genai.Client(api_key=settings.GEMINI_API_KEY_3 or settings.GEMINI_API_KEY_1)
         
         system_instruction = (
             "Eres un analista financiero experto de FashionStore. "
@@ -200,7 +204,7 @@ def ai_reports_chat(
         )
         prompt = f"{system_instruction}\n\nPregunta del usuario:\n{req.message}\n\nRespuesta:"
         
-        models_to_try = ["gemini-1.5-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
+        models_to_try = [settings.GEMINI_TEXT_MODEL]
         response = None
         last_error = None
         for model_name in models_to_try:
@@ -224,5 +228,5 @@ def ai_reports_chat(
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=503, detail="El asistente de reportes no esta disponible")
 

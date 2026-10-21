@@ -1,0 +1,10 @@
+.env
+venv
+.venv
+.git
+__pycache__
+*.db
+*.sqlite*
+scratch
+uploads
+.pytest_cache

@@ -1,187 +1,132 @@
-from typing import Any, List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
-from api.deps import get_db, get_current_active_user, require_permission
-from db.models.user import User
+from api.deps import get_db, get_current_active_user, get_user_permissions, require_permission
 from db.models.reservation import Reservation, ReservationItem, ReservationStatus
-from db.models.product import ProductVariant
-from db.models.branch import Inventory
-from schemas.reservation import (
-    Reservation as ReservationSchema,
-    ReservationCreate,
-    ReservationUpdate,
-)
+from db.models.branch import Branch
+from schemas.reservation import Reservation as ReservationSchema, ReservationCreate, ReservationUpdate
+from core.commerce import quantities, price_variant, move_stock, check_branch
 
+router = APIRouter()
 
 class ReservationStatusUpdate(BaseModel):
     status: ReservationStatus
 
-router = APIRouter()
+def can_manage(db, user):
+    return bool(get_user_permissions(db, user) & {'reservations:read', 'reservations:write', 'sales:write'})
 
+def accessible(db, user, reservation_id, manage=False):
+    query = db.query(Reservation).filter(Reservation.id == reservation_id)
+    if user.tenant_id is not None:
+        query = query.filter(Reservation.tenant_id == user.tenant_id)
+    reservation = query.with_for_update().first()
+    if not reservation:
+        raise HTTPException(404, 'Reserva no encontrada')
+    if manage or reservation.user_id != user.id:
+        if not can_manage(db, user):
+            raise HTTPException(403, 'No tienes acceso a esta reserva')
+        check_branch(db, user, reservation.branch_id)
+    return reservation
 
-@router.get("", response_model=List[ReservationSchema])
-def list_reservations(
-    db: Session = Depends(get_db),
-    skip: int = 0,
-    limit: int = 50,
-    current_user: User = Depends(get_current_active_user),
-) -> Any:
-    """
-    Lista las reservas.
-    - Clientes: solo ven las suyas.
-    - Admin/Encargado: ven todas.
-    """
-    user_perms = {p.name for p in (current_user.role.permissions if current_user.role else [])}
-    if "reservations:read" in user_perms or "users:read" in user_perms:
-        reservations = db.query(Reservation).offset(skip).limit(limit).all()
+@router.get('', response_model=List[ReservationSchema])
+def list_reservations(db: Session = Depends(get_db), skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100), branch_id: Optional[int] = None,
+    status: Optional[ReservationStatus] = None, current_user=Depends(get_current_active_user)):
+    query = db.query(Reservation)
+    if current_user.tenant_id is not None:
+        query = query.filter(Reservation.tenant_id == current_user.tenant_id)
+    if can_manage(db, current_user):
+        if 'branches:write' not in get_user_permissions(db, current_user):
+            if not current_user.branch_id:
+                raise HTTPException(403, 'No tienes sucursal asignada')
+            query = query.filter(Reservation.branch_id == current_user.branch_id)
     else:
-        reservations = (
-            db.query(Reservation)
-            .filter(Reservation.user_id == current_user.id)
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
-    return reservations
+        query = query.filter(Reservation.user_id == current_user.id)
+    if branch_id is not None:
+        query = query.filter(Reservation.branch_id == branch_id)
+    if status is not None:
+        query = query.filter(Reservation.status == status)
+    return query.order_by(Reservation.created_at.desc()).offset(skip).limit(limit).all()
 
+@router.get('/{reservation_id}', response_model=ReservationSchema)
+def get_reservation(reservation_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_active_user)):
+    return accessible(db, current_user, reservation_id)
 
-@router.get("/{reservation_id}", response_model=ReservationSchema)
-def get_reservation(
-    reservation_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-) -> Any:
-    """Obtiene el detalle de una reserva."""
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
-    if not reservation:
-        raise HTTPException(status_code=404, detail="Reserva no encontrada")
-    # Solo el dueño o staff puede verla
-    user_perms = {p.name for p in (current_user.role.permissions if current_user.role else [])}
-    if reservation.user_id != current_user.id and "reservations:read" not in user_perms and "users:read" not in user_perms:
-        raise HTTPException(status_code=403, detail="No tienes acceso a esta reserva")
-    return reservation
+@router.post('', response_model=ReservationSchema, status_code=201)
+def create_reservation(*, db: Session = Depends(get_db), reservation_in: ReservationCreate,
+                       current_user=Depends(get_current_active_user)):
+    try:
+        branch = db.get(Branch, reservation_in.branch_id)
+        if not branch or not branch.is_active:
+            raise HTTPException(400, 'Sucursal no disponible')
+        if current_user.tenant_id is not None and branch.tenant_id != current_user.tenant_id:
+            raise HTTPException(403, 'La sucursal no pertenece a tu empresa')
+        reservation = Reservation(
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id, branch_id=branch.id,
+            pickup_date=reservation_in.pickup_date, notes=reservation_in.notes, status=ReservationStatus.pending)
+        db.add(reservation)
+        db.flush()
+        for variant_id, quantity in quantities(reservation_in.items).items():
+            _, price = price_variant(db, variant_id)
+            move_stock(db, branch.id, variant_id, -quantity, 'reservation', current_user.id, f'reservation:{reservation.id}')
+            db.add(ReservationItem(
+                tenant_id=current_user.tenant_id,
+                reservation_id=reservation.id, variant_id=variant_id,
+                quantity=quantity, unit_price=float(price)))
 
+        db.commit()
+        db.refresh(reservation)
+        return reservation
+    except Exception:
+        db.rollback()
+        raise
 
-@router.post("", response_model=ReservationSchema, status_code=status.HTTP_201_CREATED)
-def create_reservation(
-    *,
-    db: Session = Depends(get_db),
-    reservation_in: ReservationCreate,
-    current_user: User = Depends(get_current_active_user),
-) -> Any:
-    """Crea una nueva reserva para el usuario autenticado."""
-    if not reservation_in.items:
-        raise HTTPException(status_code=400, detail="La reserva debe tener al menos un producto")
+def transition(db, reservation, status, user):
+    if status == reservation.status:
+        return
+    if reservation.status in (ReservationStatus.cancelled, ReservationStatus.completed):
+        raise HTTPException(409, 'La reserva ya esta cerrada')
+    if status == ReservationStatus.completed:
+        raise HTTPException(409, 'Completa la reserva desde caja seleccionando las prendas compradas')
+    if status == ReservationStatus.pending:
+        raise HTTPException(409, 'No se puede volver a pendiente')
+    if status == ReservationStatus.cancelled:
+        for variant_id, qty in quantities(reservation.items).items():
+            move_stock(db, reservation.branch_id, variant_id, qty, 'reservation_cancel', user.id, f'reservation:{reservation.id}')
+    reservation.status = status
 
-    reservation = Reservation(
-        user_id=current_user.id,
-        branch_id=reservation_in.branch_id,
-        pickup_date=reservation_in.pickup_date,
-        notes=reservation_in.notes,
-        status=ReservationStatus.pending,
-    )
-    db.add(reservation)
-    db.commit()
-    db.refresh(reservation)
+@router.patch('/{reservation_id}/cancel', response_model=ReservationSchema)
+def cancel_reservation(reservation_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_active_user)):
+    try:
+        reservation = accessible(db, current_user, reservation_id)
+        transition(db, reservation, ReservationStatus.cancelled, current_user)
+        db.commit()
+        db.refresh(reservation)
+        return reservation
+    except Exception:
+        db.rollback()
+        raise
 
-    for item_in in reservation_in.items:
-        # Bloqueo pesimista: with_for_update() impide que otro hilo modifique el stock simultaneamente
-        inv_query = db.query(Inventory).filter(Inventory.variant_id == item_in.variant_id)
-        if reservation_in.branch_id:
-            inv = inv_query.filter(Inventory.branch_id == reservation_in.branch_id).with_for_update().first()
-            if not inv:
-                inv = inv_query.with_for_update().first()
-        else:
-            inv = inv_query.with_for_update().first()
+@router.patch('/{reservation_id}/status', response_model=ReservationSchema)
+def update_reservation_status(reservation_id: int, reservation_in: ReservationStatusUpdate,
+    db: Session = Depends(get_db), current_user=Depends(require_permission('reservations:write', 'sales:write'))):
+    return update_reservation(reservation_id, ReservationUpdate(status=reservation_in.status), db, current_user)
 
-        if not inv or inv.stock < item_in.quantity:
-            db.delete(reservation)
-            db.commit()
-            raise HTTPException(status_code=400, detail=f"Stock insuficiente para la variante {item_in.variant_id}")
-            
-        # Descontamos el stock físico temporalmente
-        inv.stock -= item_in.quantity
-        db.add(inv)
-
-        # Verificar que la variante existe para obtener el precio
-        variant = db.query(ProductVariant).filter(ProductVariant.id == item_in.variant_id).first()
-        if not variant:
-            db.delete(reservation)
-            db.commit()
-            raise HTTPException(status_code=404, detail=f"Variante {item_in.variant_id} no encontrada")
-
-        item = ReservationItem(
-            reservation_id=reservation.id,
-            variant_id=item_in.variant_id,
-            quantity=item_in.quantity,
-            unit_price=item_in.unit_price or variant.price_override,
-        )
-        db.add(item)
-
-    db.commit()
-    db.refresh(reservation)
-    return reservation
-
-
-@router.patch("/{reservation_id}/status", response_model=ReservationSchema)
-def update_reservation_status(
-    reservation_id: int,
-    reservation_in: ReservationStatusUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("reservations:write", "sales:write", "users:read")),
-) -> Any:
-    """Actualiza el estado de una reserva (ej. confirmado/completado/cancelado)."""
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
-    if not reservation:
-        raise HTTPException(status_code=404, detail="Reserva no encontrada")
-
-    reservation.status = reservation_in.status
-    db.commit()
-    db.refresh(reservation)
-    return reservation
-
-
-@router.patch("/{reservation_id}/cancel", response_model=ReservationSchema)
-def cancel_reservation(
-    reservation_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-) -> Any:
-    """Cancela una reserva (solo el dueño o admin)."""
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
-    if not reservation:
-        raise HTTPException(status_code=404, detail="Reserva no encontrada")
-    if reservation.user_id != current_user.id:
-        user_perms = {p.name for p in (current_user.role.permissions if current_user.role else [])}
-        if "users:read" not in user_perms:
-            raise HTTPException(status_code=403, detail="No puedes cancelar esta reserva")
-    if reservation.status == ReservationStatus.completed:
-        raise HTTPException(status_code=400, detail="No se puede cancelar una reserva completada")
-
-    reservation.status = ReservationStatus.cancelled
-    db.commit()
-    db.refresh(reservation)
-    return reservation
-
-
-@router.patch("/{reservation_id}", response_model=ReservationSchema)
-def update_reservation(
-    reservation_id: int,
-    reservation_in: ReservationUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("reservations:write", "sales:write", "users:read")),
-) -> Any:
-    """Actualiza notas, horario o estado de una reserva."""
-    reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
-    if not reservation:
-        raise HTTPException(status_code=404, detail="Reserva no encontrada")
-
-    update_data = reservation_in.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(reservation, field, value)
-
-    db.commit()
-    db.refresh(reservation)
-    return reservation
+@router.patch('/{reservation_id}', response_model=ReservationSchema)
+def update_reservation(reservation_id: int, reservation_in: ReservationUpdate,
+    db: Session = Depends(get_db), current_user=Depends(require_permission('reservations:write', 'sales:write'))):
+    try:
+        reservation = accessible(db, current_user, reservation_id, manage=True)
+        if reservation_in.status is not None:
+            transition(db, reservation, reservation_in.status, current_user)
+        for field, value in reservation_in.model_dump(exclude_unset=True).items():
+            if field != 'status':
+                setattr(reservation, field, value)
+        db.commit()
+        db.refresh(reservation)
+        return reservation
+    except Exception:
+        db.rollback()
+        raise

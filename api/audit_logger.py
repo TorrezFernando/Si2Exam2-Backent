@@ -8,12 +8,14 @@ def log_audit(
     action: str,
     entity_type: str,
     entity_id: str | None = None,
-    details: dict | None = None
+    details: dict | None = None,
+    tenant_id: int | None = None
 ):
     """
     Registra una acción en la bitácora de auditoría.
     """
     audit = AuditLog(
+        tenant_id=tenant_id,
         user_id=user_id,
         action=action,
         entity_type=entity_type,
@@ -23,4 +25,5 @@ def log_audit(
     db.add(audit)
     db.commit()
     db.refresh(audit)
+
     return audit

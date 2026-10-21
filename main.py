@@ -24,8 +24,10 @@ async def lifespan(app: FastAPI):
     Evento de inicio: verifica conexión a la BD.
     En producción las migraciones se aplican con Alembic (no create_all).
     """
+    from core.config import validate_production
+    validate_production()
     print(f"[START] Iniciando {settings.PROJECT_NAME} v{settings.VERSION}")
-    print(f"[DB]    Base de datos: {settings.SQLALCHEMY_DATABASE_URI[:50]}...")
+    print("[DB]    Configuracion de base de datos cargada.")
     yield
     print("[STOP] Cerrando la aplicacion.")
 
@@ -154,3 +156,10 @@ app.include_router(
     prefix=f"{settings.API_V1_STR}/ai/chat",
     tags=["🤖 IA Chat"],
 )
+
+from api.routers import payments, operations, saas, sync
+app.include_router(payments.router, prefix=f"{settings.API_V1_STR}/payments", tags=["Pagos"])
+app.include_router(operations.router, prefix=f"{settings.API_V1_STR}/operations", tags=["Gestion comercial"])
+app.include_router(saas.router, prefix=f"{settings.API_V1_STR}/saas", tags=["☁️ SaaS & Planes"])
+app.include_router(sync.router, prefix=f"{settings.API_V1_STR}/sync", tags=["⚡ Sincronización Offline"])
+
