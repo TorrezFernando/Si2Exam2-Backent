@@ -356,3 +356,72 @@ def test_garment_exchange_window_expired(client, auth_headers):
     resp = client.post(f"/api/v1/orders/{expired_order_id}/exchange", json=payload, headers=headers)
     assert resp.status_code == 400
     assert "Plazo para cambio de prendas vencido" in resp.json()["detail"]
+
+
+def test_sync_rejects_card_payment_for_offline(client, auth_headers):
+    headers = auth_headers["tenant_a"]
+    cat_resp = client.get("/api/v1/sync/catalog?branch_id=1", headers=headers).json()
+    variant = cat_resp["products"][0]["variants"][0]
+
+    uuid_test = f"test-card-reject-{datetime.now().timestamp()}"
+    payload = {
+        "branch_id": 1,
+        "sales": [
+            {
+                "client_operation_uuid": uuid_test,
+                "payment_method": "tarjeta",  # Tarjeta no permitida en offline
+                "total_amount": 100.0,
+                "items": [{"variant_id": variant["id"], "quantity": 1, "unit_price": variant["price"]}],
+            }
+        ],
+        "reservations": [],
+    }
+
+    res = client.post("/api/v1/sync/operations", json=payload, headers=headers)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["conflict_count"] == 1
+    assert data["receipts"][0]["status"] == "RECHAZADA_CONFLICTO"
+    assert "Solo se admite efectivo" in data["receipts"][0]["rejection_reason"]
+
+    # Reintento con mismo UUID debe ser estrictamente idempotente y conservar conflicto
+    res_repeat = client.post("/api/v1/sync/operations", json=payload, headers=headers)
+    assert res_repeat.status_code == 200
+    data_repeat = res_repeat.json()
+    assert data_repeat["conflict_count"] == 1
+    assert data_repeat["receipts"][0]["status"] == "RECHAZADA_CONFLICTO"
+
+
+def test_sync_rejects_cross_tenant_customer(client, auth_headers):
+    headers_a = auth_headers["tenant_a"]
+
+    with SessionLocal() as db:
+        from db.models.user import User
+        user_b = db.query(User).filter(User.tenant_id == 2).first()
+        customer_b_id = user_b.id if user_b else 99999
+
+    cat_a = client.get("/api/v1/sync/catalog?branch_id=1", headers=headers_a).json()
+    variant_a = cat_a["products"][0]["variants"][0]
+
+    uuid_test = f"test-cross-tenant-{datetime.now().timestamp()}"
+    payload = {
+        "branch_id": 1,
+        "sales": [
+            {
+                "client_operation_uuid": uuid_test,
+                "user_id": customer_b_id,  # Cliente ajeno al Tenant A
+                "payment_method": "efectivo",
+                "total_amount": variant_a["price"],
+                "items": [{"variant_id": variant_a["id"], "quantity": 1, "unit_price": variant_a["price"]}],
+            }
+        ],
+        "reservations": [],
+    }
+
+    res = client.post("/api/v1/sync/operations", json=payload, headers=headers_a)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["conflict_count"] == 1
+    assert data["receipts"][0]["status"] == "RECHAZADA_CONFLICTO"
+    assert "no pertenece a la empresa" in data["receipts"][0]["rejection_reason"] or "no existe" in data["receipts"][0]["rejection_reason"]
+

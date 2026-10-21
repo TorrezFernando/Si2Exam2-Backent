@@ -10,7 +10,7 @@ from db.models.user import User
 from db.models.tenant import Tenant
 from db.models.branch import Branch, Inventory
 from db.models.product import Product, ProductVariant, Category
-from db.models.sale import Order, OrderItem, OrderTypeEnum, PaymentStatusEnum
+from db.models.sale import Order, OrderItem, OrderTypeEnum, PaymentStatusEnum, PaymentMethodEnum
 from db.models.reservation import Reservation, ReservationItem, ReservationStatus
 from core.commerce import move_stock, price_variant, quantities
 from schemas.sync import (
@@ -118,19 +118,27 @@ def get_offline_catalog(
             )
         )
 
-    # 6. Clientes mínimos (para autocompletar ventas en caja offline)
-    cust_query = db.query(User).filter(User.is_active.is_(True))
-    if tenant_id is not None:
-        cust_query = cust_query.filter(User.tenant_id == tenant_id)
-    customers = [
-        SyncCustomerItem(
-            id=u.id,
-            full_name=u.full_name or u.email,
-            email=u.email,
-            phone=u.phone,
-        )
-        for u in cust_query.limit(200).all()
-    ]
+    # 6. Clientes mínimos (solo para personal con permisos de venta o lectura de usuarios)
+    is_admin = bool(current_user.role and current_user.role.name in ("superadmin", "administrador"))
+    customers = []
+    if is_admin or (perms & {"sales:write", "users:read"}):
+        cust_query = db.query(User).filter(User.is_active.is_(True))
+        if tenant_id is not None:
+            cust_query = cust_query.filter(User.tenant_id == tenant_id)
+        # Solo clientes (no personal ni administradores para no exponer datos de staff a caja básica)
+        if hasattr(User, "role_id"):
+            cust_query = cust_query.join(User.role, isouter=True).filter(
+                (User.role.has(name="cliente")) | (User.role_id.is_(None))
+            )
+        customers = [
+            SyncCustomerItem(
+                id=u.id,
+                full_name=u.full_name or u.email,
+                email=u.email,
+                phone=u.phone,
+            )
+            for u in cust_query.limit(200).all()
+        ]
 
     logger.info(
         f"[RNF10-SYNC][CATALOG] Tenant={tenant_id} Branch={target_branch_id} "
@@ -163,12 +171,19 @@ def sync_offline_operations(
     Retorna recibo individual para cada operación (CONFIRMADA o RECHAZADA_CONFLICTO).
     """
     perms = get_user_permissions(db, current_user)
-    if not (perms & {"sales:write", "reservations:write"}):
-        if not (current_user.role and current_user.role.name in ("cajero", "encargado", "administrador", "superadmin")):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Permisos insuficientes para sincronizar operaciones de caja.",
-            )
+    is_admin = bool(current_user.role and current_user.role.name in ("superadmin", "administrador"))
+    
+    # Validación estricta de permisos según los tipos de operación presentes en el lote
+    if batch.sales and not (is_admin or "sales:write" in perms):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permisos insuficientes para sincronizar ventas de caja.",
+        )
+    if batch.reservations and not (is_admin or "reservations:write" in perms):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permisos insuficientes para sincronizar reservas.",
+        )
 
     tenant_id = current_user.tenant_id
 
@@ -229,6 +244,94 @@ def sync_offline_operations(
                 conflict_count += 1
             continue
 
+        # 0. Validar método de pago: solo efectivo/cash para offline sync
+        payment_method_raw = str(sale_in.payment_method).lower()
+        if not ("efectivo" in payment_method_raw or "cash" in payment_method_raw):
+            conflict_msg = f"Método de pago '{sale_in.payment_method}' no permitido para sincronización offline. Solo se admite efectivo."
+            logger.warning(f"[RNF10-SYNC][SALE_PAYMENT_CONFLICT] UUID={uuid}: {conflict_msg}")
+            try:
+                conflict_order = Order(
+                    tenant_id=tenant_id,
+                    user_id=current_user.id,
+                    branch_id=batch.branch_id,
+                    order_type=OrderTypeEnum.presencial,
+                    payment_method=PaymentMethodEnum.efectivo,
+                    payment_status=PaymentStatusEnum.failed,
+                    is_paid=False,
+                    payment_provider="Caja_Offline",
+                    transaction_ref=f"FS-OFF-FAIL-{uuid[:8]}",
+                    total_amount=0.0,
+                    client_operation_uuid=uuid,
+                    is_offline_operation=True,
+                    sync_status="RECHAZADA_CONFLICTO",
+                    rejection_reason=conflict_msg,
+                    created_at=sale_in.created_at or datetime.now(timezone.utc),
+                )
+                db.add(conflict_order)
+                db.commit()
+            except Exception:
+                db.rollback()
+
+            conflict_count += 1
+            receipts.append(
+                SyncOperationReceipt(
+                    operation_type="sale",
+                    client_operation_uuid=uuid,
+                    status="RECHAZADA_CONFLICTO",
+                    server_id=None,
+                    rejection_reason=conflict_msg,
+                    processed_at=datetime.now(timezone.utc),
+                )
+            )
+            continue
+
+        # 0.1 Validar pertenencia del cliente al tenant si se especifica user_id
+        customer_id = current_user.id
+        if sale_in.user_id:
+            cust_q = db.query(User).filter(User.id == sale_in.user_id, User.is_active.is_(True))
+            if tenant_id is not None:
+                cust_q = cust_q.filter(User.tenant_id == tenant_id)
+            cust = cust_q.first()
+            if not cust:
+                conflict_msg = f"Cliente con ID {sale_in.user_id} no existe o no pertenece a la empresa {tenant_id}."
+                logger.warning(f"[RNF10-SYNC][SALE_CUST_CONFLICT] UUID={uuid}: {conflict_msg}")
+                try:
+                    conflict_order = Order(
+                        tenant_id=tenant_id,
+                        user_id=current_user.id,
+                        branch_id=batch.branch_id,
+                        order_type=OrderTypeEnum.presencial,
+                        payment_method=PaymentMethodEnum.efectivo,
+                        payment_status=PaymentStatusEnum.failed,
+                        is_paid=False,
+                        payment_provider="Caja_Offline",
+                        transaction_ref=f"FS-OFF-FAIL-{uuid[:8]}",
+                        total_amount=0.0,
+                        client_operation_uuid=uuid,
+                        is_offline_operation=True,
+                        sync_status="RECHAZADA_CONFLICTO",
+                        rejection_reason=conflict_msg,
+                        created_at=sale_in.created_at or datetime.now(timezone.utc),
+                    )
+                    db.add(conflict_order)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
+                conflict_count += 1
+                receipts.append(
+                    SyncOperationReceipt(
+                        operation_type="sale",
+                        client_operation_uuid=uuid,
+                        status="RECHAZADA_CONFLICTO",
+                        server_id=None,
+                        rejection_reason=conflict_msg,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                continue
+            customer_id = cust.id
+
         # Procesamiento en subtransacción atómica aislada
         savepoint = db.begin_nested()
         try:
@@ -257,6 +360,30 @@ def sync_offline_operations(
                 savepoint.rollback()
                 conflict_count += 1
                 logger.warning(f"[RNF10-SYNC][SALE_CONFLICT] UUID={uuid}: {conflict_msg}")
+                # Persistir conflicto para idempotencia
+                try:
+                    conflict_order = Order(
+                        tenant_id=tenant_id,
+                        user_id=customer_id,
+                        branch_id=batch.branch_id,
+                        order_type=OrderTypeEnum.presencial,
+                        payment_method=PaymentMethodEnum.efectivo,
+                        payment_status=PaymentStatusEnum.failed,
+                        is_paid=False,
+                        payment_provider="Caja_Offline",
+                        transaction_ref=f"FS-OFF-FAIL-{uuid[:8]}",
+                        total_amount=0.0,
+                        client_operation_uuid=uuid,
+                        is_offline_operation=True,
+                        sync_status="RECHAZADA_CONFLICTO",
+                        rejection_reason=conflict_msg,
+                        created_at=sale_in.created_at or datetime.now(timezone.utc),
+                    )
+                    db.add(conflict_order)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
                 receipts.append(
                     SyncOperationReceipt(
                         operation_type="sale",
@@ -285,24 +412,19 @@ def sync_offline_operations(
                 )
                 priced.append((vid, qty, float(price)))
 
-            # Validar cliente asignado (o fallback a cajero)
-            customer_id = current_user.id
-            if sale_in.user_id:
-                cust = db.query(User).filter(User.id == sale_in.user_id).first()
-                if cust:
-                    customer_id = cust.id
+            server_calculated_total = round(sum(q * p for _, q, p in priced), 2)
 
             order = Order(
                 tenant_id=tenant_id,
                 user_id=customer_id,
                 branch_id=batch.branch_id,
                 order_type=OrderTypeEnum.presencial,
-                payment_method=sale_in.payment_method,
+                payment_method=PaymentMethodEnum.efectivo,
                 payment_status=PaymentStatusEnum.paid,
                 is_paid=True,
                 payment_provider="Caja_Offline",
                 transaction_ref=f"FS-OFF-{uuid[:8]}",
-                total_amount=sale_in.total_amount if sale_in.total_amount > 0 else sum(q * p for _, q, p in priced),
+                total_amount=server_calculated_total,
                 client_operation_uuid=uuid,
                 is_offline_operation=True,
                 sync_status="CONFIRMADA",
@@ -338,6 +460,28 @@ def sync_offline_operations(
 
         except Exception as e:
             savepoint.rollback()
+            # Manejo de condición de carrera / colisión concurrente de client_operation_uuid
+            existing_concur_q = db.query(Order).filter(Order.client_operation_uuid == uuid)
+            if tenant_id is not None:
+                existing_concur_q = existing_concur_q.filter(Order.tenant_id == tenant_id)
+            committed_order = existing_concur_q.first()
+            if committed_order:
+                receipts.append(
+                    SyncOperationReceipt(
+                        operation_type="sale",
+                        client_operation_uuid=uuid,
+                        status=committed_order.sync_status,
+                        server_id=committed_order.id,
+                        rejection_reason=committed_order.rejection_reason,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                if committed_order.sync_status == "CONFIRMADA":
+                    confirmed_count += 1
+                else:
+                    conflict_count += 1
+                continue
+
             conflict_count += 1
             error_msg = f"Error al procesar venta offline: {str(e)}"
             logger.error(f"[RNF10-SYNC][SALE_ERROR] UUID={uuid}: {error_msg}")
@@ -382,6 +526,48 @@ def sync_offline_operations(
                 conflict_count += 1
             continue
 
+        # Validar pertenencia del cliente al tenant si se especifica user_id
+        customer_id = current_user.id
+        if res_in.user_id:
+            cust_q = db.query(User).filter(User.id == res_in.user_id, User.is_active.is_(True))
+            if tenant_id is not None:
+                cust_q = cust_q.filter(User.tenant_id == tenant_id)
+            cust = cust_q.first()
+            if not cust:
+                conflict_msg = f"Cliente con ID {res_in.user_id} no existe o no pertenece a la empresa {tenant_id}."
+                logger.warning(f"[RNF10-SYNC][RES_CUST_CONFLICT] UUID={uuid}: {conflict_msg}")
+                try:
+                    conflict_res = Reservation(
+                        tenant_id=tenant_id,
+                        user_id=current_user.id,
+                        branch_id=batch.branch_id,
+                        status=ReservationStatus.cancelled,
+                        pickup_date=res_in.pickup_date,
+                        notes=res_in.notes,
+                        client_operation_uuid=uuid,
+                        is_offline_operation=True,
+                        sync_status="RECHAZADA_CONFLICTO",
+                        rejection_reason=conflict_msg,
+                    )
+                    db.add(conflict_res)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
+                conflict_count += 1
+                receipts.append(
+                    SyncOperationReceipt(
+                        operation_type="reservation",
+                        client_operation_uuid=uuid,
+                        status="RECHAZADA_CONFLICTO",
+                        server_id=None,
+                        rejection_reason=conflict_msg,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                continue
+            customer_id = cust.id
+
         savepoint = db.begin_nested()
         try:
             # 1. Bloqueo pesimista e inspección de stock para cada variante
@@ -409,6 +595,25 @@ def sync_offline_operations(
                 savepoint.rollback()
                 conflict_count += 1
                 logger.warning(f"[RNF10-SYNC][RES_CONFLICT] UUID={uuid}: {conflict_msg}")
+                # Persistir conflicto para idempotencia
+                try:
+                    conflict_res = Reservation(
+                        tenant_id=tenant_id,
+                        user_id=customer_id,
+                        branch_id=batch.branch_id,
+                        status=ReservationStatus.cancelled,
+                        pickup_date=res_in.pickup_date,
+                        notes=res_in.notes,
+                        client_operation_uuid=uuid,
+                        is_offline_operation=True,
+                        sync_status="RECHAZADA_CONFLICTO",
+                        rejection_reason=conflict_msg,
+                    )
+                    db.add(conflict_res)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
                 receipts.append(
                     SyncOperationReceipt(
                         operation_type="reservation",
@@ -422,12 +627,6 @@ def sync_offline_operations(
                 continue
 
             # 2. Descuento temporal / retención de stock
-            customer_id = current_user.id
-            if res_in.user_id:
-                cust = db.query(User).filter(User.id == res_in.user_id).first()
-                if cust:
-                    customer_id = cust.id
-
             reservation = Reservation(
                 tenant_id=tenant_id,
                 user_id=customer_id,
@@ -480,6 +679,28 @@ def sync_offline_operations(
 
         except Exception as e:
             savepoint.rollback()
+            # Manejo de condición de carrera / colisión concurrente de client_operation_uuid
+            existing_concur_q = db.query(Reservation).filter(Reservation.client_operation_uuid == uuid)
+            if tenant_id is not None:
+                existing_concur_q = existing_concur_q.filter(Reservation.tenant_id == tenant_id)
+            committed_res = existing_concur_q.first()
+            if committed_res:
+                receipts.append(
+                    SyncOperationReceipt(
+                        operation_type="reservation",
+                        client_operation_uuid=uuid,
+                        status=committed_res.sync_status,
+                        server_id=committed_res.id,
+                        rejection_reason=committed_res.rejection_reason,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                )
+                if committed_res.sync_status == "CONFIRMADA":
+                    confirmed_count += 1
+                else:
+                    conflict_count += 1
+                continue
+
             conflict_count += 1
             error_msg = f"Error al procesar reserva offline: {str(e)}"
             logger.error(f"[RNF10-SYNC][RES_ERROR] UUID={uuid}: {error_msg}")
