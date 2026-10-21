@@ -9,4 +9,5 @@ from db.models.rbac import Role, Permission, RolePermission, UserPermission
 from db.models.audit import AuditLog
 from db.models.recommendation import UserPreference
 from db.models.operations import Supplier, Season, Collection, InventoryMovement
+from db.models.sync_operation import SyncOperation
 

@@ -163,12 +163,12 @@ def test_sync_sale_stock_conflict_handling(client, auth_headers):
             {
                 "client_operation_uuid": conflict_uuid,
                 "payment_method": "efectivo",
-                "total_amount": 100.0,
+                "total_amount": round(excess_qty * variant["price"], 2),
                 "items": [
                     {
                         "variant_id": variant["id"],
                         "quantity": excess_qty,
-                        "unit_price": 50.0,
+                        "unit_price": variant["price"],
                     }
                 ],
             }
