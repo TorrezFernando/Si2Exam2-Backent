@@ -38,6 +38,10 @@ class User(Base):
     # Relación con Tenant
     tenant = relationship("Tenant", back_populates="users")
 
+    @property
+    def tenant_name(self):
+        return self.tenant.name if self.tenant else None
+
     # Relación con Branch
     branch = relationship("Branch", foreign_keys=[branch_id])
     

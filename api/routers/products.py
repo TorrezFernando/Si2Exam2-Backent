@@ -1,5 +1,5 @@
 from typing import Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -19,16 +19,29 @@ from core.ai_service import generate_recommendations
 from core.commerce import check_branch
 from db.models.operations import Supplier, Season, Collection, InventoryMovement
 
+from core.storefront import selected_store, storefront_metadata
+
 router = APIRouter()
+
+@router.get('/storefront')
+def get_storefront(store: Optional[str] = None, db: Session = Depends(get_db),
+                   current_user: Optional[User] = Depends(get_current_user_optional), request: Request = None):
+    return storefront_metadata(db, current_user, store, request)
+
 
 # --- CATEGORIES ---
 
 @router.get("/categories", response_model=List[CategorySchema])
 def list_categories(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: Optional[str] = None,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    request: Request = None
 ) -> Any:
     """Lista todas las categorías disponibles."""
-    return db.query(Category).all()
+    tenant = selected_store(db, current_user, store, request)
+    if not tenant: return []
+    return db.query(Category).filter(or_(Category.tenant_id == tenant.id, Category.tenant_id.is_(None))).all()
 
 # --- PRODUCTS ---
 
@@ -38,10 +51,15 @@ def list_products(
     category_id: Optional[int] = Query(None, description="Filtrar por categoría"),
     season: Optional[str] = Query(None, description="Filtrar por temporada"),
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=100)
+    limit: int = Query(50, ge=1, le=100),
+    store: Optional[str] = None,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    request: Request = None
 ) -> Any:
     """Lista productos (Catálogo). Accesible públicamente o requiere auth según diseño."""
-    query = db.query(Product).filter(Product.is_active.is_(True))
+    tenant = selected_store(db, current_user, store, request)
+    if not tenant: return []
+    query = db.query(Product).filter(Product.is_active.is_(True), Product.tenant_id == tenant.id)
     
     if category_id is not None:
         query = query.filter(Product.category_id == category_id)
@@ -57,12 +75,17 @@ def search_products(
     db: Session = Depends(get_db),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=50),
+    store: Optional[str] = None,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    request: Request = None
 ) -> Any:
     """Busca productos por nombre o descripción (búsqueda full-text simple)."""
+    tenant = selected_store(db, current_user, store, request)
+    if not tenant: return []
     pattern = f"%{q}%"
     results = (
         db.query(Product)
-        .filter(Product.is_active.is_(True))
+        .filter(Product.is_active.is_(True), Product.tenant_id == tenant.id)
         .filter(
             or_(
                 Product.name.ilike(pattern),
@@ -85,7 +108,9 @@ async def get_recommended_products(
     pref = db.query(UserPreference).filter(UserPreference.user_id == current_user.id).first()
     
     # Obtener todos los productos (idealmente solo los activos o en stock)
-    all_products = db.query(Product).filter(Product.is_active.is_(True)).all()
+    tenant = selected_store(db, current_user)
+    if not tenant: return []
+    all_products = db.query(Product).filter(Product.is_active.is_(True), Product.tenant_id == tenant.id).all()
     if not all_products:
         return []
         
@@ -190,10 +215,15 @@ def interact_with_product(
 @router.get("/{product_id}", response_model=ProductSchema)
 def get_product(
     product_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: Optional[str] = None,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    request: Request = None
 ) -> Any:
     """Obtiene un producto por su ID."""
-    product = db.query(Product).filter(Product.id == product_id).first()
+    tenant = selected_store(db, current_user, store, request)
+    if not tenant: raise HTTPException(404, 'Selecciona una tienda.')
+    product = db.query(Product).filter(Product.id == product_id, Product.tenant_id == tenant.id).first()
     if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     return product

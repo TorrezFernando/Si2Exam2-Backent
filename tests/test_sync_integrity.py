@@ -143,3 +143,46 @@ def test_invalid_context_rejected(shop,case):
     with pytest.raises(HTTPException) as error: send(shop,[sale(shop)])
     assert error.value.status_code==403
     assert stock(shop)==5
+
+
+def test_storefront_uses_account_company_and_public_slug(shop):
+    from core.storefront import storefront_metadata
+    public = storefront_metadata(shop.db, None)
+    assert public['selected'] is None
+    assert len(public['stores']) == 2
+    selected = storefront_metadata(shop.db, None, 'other')
+    assert selected['selected']['name'] == 'Other'
+    own = storefront_metadata(shop.db, shop.user, 'other')
+    assert own['selected']['name'] == 'Test'
+    assert len(own['stores']) == 1
+    assert shop.user.tenant_name == 'Test'
+
+
+def test_public_catalog_and_details_never_mix_tenants(shop):
+    from api.routers.products import list_products, get_product, search_products
+    foreign = Product(name='Foreign shirt',base_price=9,tenant_id=shop.foreign.tenant_id)
+    shop.db.add(foreign);shop.db.commit()
+    def products(user,slug):
+        return list_products(db=shop.db,category_id=None,season=None,skip=0,limit=50,store=slug,current_user=user)
+    assert products(None,None)==[]
+    assert [p.id for p in products(None,'other')]==[foreign.id]
+    assert [p.id for p in products(shop.user,'other')]==[shop.variant.product_id]
+    with pytest.raises(HTTPException) as error:
+        get_product(foreign.id,db=shop.db,store='test',current_user=None)
+    assert error.value.status_code==404
+    assert search_products(q='Foreign',db=shop.db,skip=0,limit=20,store='test',current_user=None)==[]
+
+
+def test_inactive_store_is_not_public(shop):
+    from core.storefront import storefront_metadata
+    shop.tenant.is_active=False;shop.db.commit()
+    assert len(storefront_metadata(shop.db,None)['stores'])==1
+    with pytest.raises(HTTPException):storefront_metadata(shop.db,None,'test')
+
+
+def test_only_superadmin_can_select_explicit_header_context(shop):
+    from core.storefront import selected_store
+    request=SimpleNamespace(headers={'x-tenant-id':str(shop.foreign.tenant_id)})
+    assert selected_store(shop.db,shop.user,request=request).id==shop.tenant.id
+    superadmin=SimpleNamespace(tenant_id=None,is_active=True,role=SimpleNamespace(name='superadmin'))
+    assert selected_store(shop.db,superadmin,request=request).id==shop.foreign.tenant_id

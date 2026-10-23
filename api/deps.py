@@ -76,7 +76,7 @@ oauth2_scheme_optional = OAuth2PasswordBearer(
 
 def get_current_user_optional(
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme_optional),
+    token: Optional[str] = Depends(oauth2_scheme_optional),
 ) -> User | None:
     if not token:
         return None

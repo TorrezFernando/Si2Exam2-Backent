@@ -122,7 +122,7 @@ def seed():
         print(f"   [+] Plan: {plan_pro.name} (Max sucursales: {plan_pro.max_branches}, IA: {plan_pro.has_ai_reports})")
 
         tenant_a = Tenant(
-            name="Empresa A (FashionStore Corp)",
+            name="FashionStore Corp",
             subdomain="fashionstore",
             is_active=True,
             exchange_window_days=30,

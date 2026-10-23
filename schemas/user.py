@@ -71,6 +71,7 @@ class PasswordChange(BaseModel):
 
 class UserInDBBase(UserBase):
     id: int
+    tenant_name: Optional[str] = None
     role_id: Optional[int] = None
     branch_id: Optional[int] = None
     is_active: bool
