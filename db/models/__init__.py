@@ -11,3 +11,7 @@ from db.models.recommendation import UserPreference
 from db.models.operations import Supplier, Season, Collection, InventoryMovement
 from db.models.sync_operation import SyncOperation
 
+
+from db.models.incoming import IncomingStock, IncomingReceipt
+
+from db.models.full_return import FullReturn

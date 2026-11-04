@@ -18,6 +18,7 @@ from core.ai_service import generate_tryon, save_tryon_result
 from core.config import settings
 from db.models.product import Product
 from db.models.user import User
+from core.access import company_id
 
 router = APIRouter()
 
@@ -55,7 +56,7 @@ async def virtual_tryon(
         raise HTTPException(status_code=400, detail=f"La foto supera el límite de {MAX_FILE_SIZE_MB}MB.")
 
     # ── Obtener producto ────────────────────────────────────────────────────────
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = db.query(Product).filter(Product.id == product_id, Product.tenant_id == company_id(current_user), Product.is_active.is_(True)).first()
     if not product:
         raise HTTPException(status_code=404, detail="Producto no encontrado.")
 

@@ -96,25 +96,9 @@ def seed():
     try:
         # ─── 0. PLANES Y TENANTS (SAAS MULTITENANT) ────────────────────────────
         print("\n--- 0. Creando Planes de Suscripción y Tenants ---")
-        plan_basic = SubscriptionPlan(
-            name="Plan Básico",
-            code="basic",
-            max_branches=2,
-            has_ai_reports=False,
-            has_offline_sync=True,
-            price=29.99,
-            is_active=True,
-        )
-        plan_pro = SubscriptionPlan(
-            name="Plan Profesional",
-            code="professional",
-            max_branches=10,
-            has_ai_reports=True,
-            has_offline_sync=True,
-            price=99.99,
-            is_active=True,
-        )
-        db.add_all([plan_basic, plan_pro])
+        from core.subscription_plans import ensure_plans
+        plans = ensure_plans(db)
+        plan_basic, plan_pro = plans['basic'], plans['professional']
         db.commit()
         db.refresh(plan_basic)
         db.refresh(plan_pro)
@@ -125,13 +109,13 @@ def seed():
             name="FashionStore Corp",
             subdomain="fashionstore",
             is_active=True,
-            exchange_window_days=30,
+            exchange_window_days=2,
         )
         tenant_b = Tenant(
             name="Empresa B (Boutique Express)",
             subdomain="boutique-express",
             is_active=True,
-            exchange_window_days=15,
+            exchange_window_days=2,
         )
         db.add_all([tenant_a, tenant_b])
         db.commit()

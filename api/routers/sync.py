@@ -103,7 +103,7 @@ def get_offline_catalog(
                     sku=v.sku,
                     size=v.size,
                     color=v.color,
-                    price=float(v.price_override if v.price_override is not None else p.base_price),
+                    price=float(v.effective_price),
                     stock=max(0, stock),
                     image_url=v.image_url,
                 )
@@ -114,9 +114,10 @@ def get_offline_catalog(
                 id=p.id,
                 name=p.name,
                 description=p.description,
+                weight_grams=p.weight_grams, fabric_type=p.fabric_type, design=p.design,
                 category_id=p.category_id,
                 category_name=p.category.name if p.category else None,
-                base_price=p.base_price,
+                base_price=p.effective_price,
                 image_url=p.image_url,
                 variants=sync_variants,
             )

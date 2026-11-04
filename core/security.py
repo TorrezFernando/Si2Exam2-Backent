@@ -30,7 +30,7 @@ def create_access_token(
     - sub       : ID del usuario (como string)
     - role      : Rol del usuario
     - tenant_id : ID de la empresa contratante (Tenant)
-    - plan_code : Código del plan activo ('basic', 'professional')
+    - plan_code : Código del plan activo ('basic', 'professional', 'enterprise')
     - plan_id   : ID del plan de suscripción
     - exp       : Tiempo de expiración
     """

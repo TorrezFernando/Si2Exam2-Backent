@@ -3,10 +3,12 @@ import json
 from datetime import date, datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from core.exchange_reporting import exchange_summary, full_return_summary
+from core.access import company_id
 
 from db.database import get_db
 from db.models.user import User
@@ -27,9 +29,7 @@ def get_orders_query(
     if "sales:read" not in get_user_permissions(db, current_user):
         raise HTTPException(status_code=403, detail="No tienes permisos para ver reportes.")
 
-    query = db.query(Order)
-    if current_user.tenant_id is not None:
-        query = query.filter(Order.tenant_id == current_user.tenant_id)
+    query = db.query(Order).filter(Order.tenant_id == company_id(current_user))
 
     # Restringir a la sucursal del supervisor
     if "branches:write" not in get_user_permissions(db, current_user):
@@ -38,6 +38,8 @@ def get_orders_query(
         query = query.filter(Order.branch_id == current_user.branch_id)
 
 
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(422, 'La fecha inicial debe ser anterior o igual a la final.')
     # Filtros
     if start_date:
         query = query.filter(func.date(Order.created_at) >= start_date)
@@ -81,6 +83,8 @@ def get_sales_report_json(
         })
     
     return {
+        "full_returns": full_return_summary(db,current_user,start_date,end_date,order_type,payment_method),
+        "exchange_settlements": exchange_summary(db,current_user,start_date,end_date,order_type,payment_method),
         "total_revenue": total_revenue,
         "count": len(data),
         "data": data
@@ -99,6 +103,9 @@ def export_sales_report(
 ):
     query = get_orders_query(db, current_user, start_date, end_date, order_type, payment_method)
     orders = query.all()
+
+    settlements = exchange_summary(db,current_user,start_date,end_date,order_type,payment_method)
+    full_returns = full_return_summary(db,current_user,start_date,end_date,order_type,payment_method)
 
     if format == "excel":
         from openpyxl import Workbook
@@ -122,6 +129,11 @@ def export_sales_report(
                 customer
             ])
             
+        ws.append([])
+        ws.append(['Diferencias de cambios por fecha de cambio (efectivo)'])
+        ws.append(['Cobrado', settlements['collected'], 'Devuelto', settlements['refunded'], 'Neto', settlements['net']])
+        ws.append(['Devoluciones completas registradas en el periodo', full_returns['count'], 'Efectivo devuelto', full_returns['refunded']])
+        ws.append(['Cambios historicos sin liquidacion documentada', settlements['unverified_count']])
         stream = io.BytesIO()
         wb.save(stream)
         stream.seek(0)
@@ -164,6 +176,9 @@ def export_sales_report(
         pdf.set_font("Helvetica", 'B', 12)
         pdf.cell(200, 10, txt=f"TOTAL RECAUDADO: ${total:.2f}", new_x="LMARGIN", new_y="NEXT", align="L")
         
+        pdf.set_font('Helvetica', '', 10)
+        pdf.multi_cell(0, 8, new_x="LMARGIN", new_y="NEXT", text=f"Cambios del periodo (efectivo): cobrado {settlements['collected']:.2f}; devuelto {settlements['refunded']:.2f}; neto {settlements['net']:.2f}.\nRegistros sin liquidacion documentada: {settlements['unverified_count']}.")
+        pdf.multi_cell(0,8,new_x="LMARGIN",new_y="NEXT",text=f"Devoluciones completas registradas: {full_returns['count']}; efectivo devuelto: {full_returns['refunded']:.2f}.")
         pdf_bytes = pdf.output()
         stream = io.BytesIO(pdf_bytes)
         
@@ -183,9 +198,12 @@ class ReportChatRequest(BaseModel):
 @router.post("/ai-chat")
 def ai_reports_chat(
     req: ReportChatRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    from core.analytics import authorize
+    authorize(db, current_user, request)
     # Validar permisos
     if "sales:read" not in get_user_permissions(db, current_user):
         raise HTTPException(status_code=403, detail="No tienes permisos para usar el asistente.")
@@ -204,7 +222,7 @@ def ai_reports_chat(
         )
         prompt = f"{system_instruction}\n\nPregunta del usuario:\n{req.message}\n\nRespuesta:"
         
-        models_to_try = [settings.GEMINI_TEXT_MODEL]
+        models_to_try = [settings.GEMINI_TEXT_MODEL or 'gemini-3.5-flash']
         response = None
         last_error = None
         for model_name in models_to_try:
@@ -230,3 +248,6 @@ def ai_reports_chat(
         traceback.print_exc()
         raise HTTPException(status_code=503, detail="El asistente de reportes no esta disponible")
 
+
+from api.routers.inventory_reports import router as inventory_router
+router.include_router(inventory_router)

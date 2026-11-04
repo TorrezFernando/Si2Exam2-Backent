@@ -5,6 +5,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 from db.database import Base
 from db.models import (Tenant, Subscription, SubscriptionPlan, Branch, User, Role,
     Permission, UserPermission, Product, ProductVariant, Inventory, Order, Reservation)
@@ -15,7 +16,7 @@ from schemas.sync import SyncBatchRequest
 
 @pytest.fixture
 def shop():
-    engine = create_engine('sqlite:///:memory:')
+    engine = create_engine('sqlite:///:memory:', connect_args={'check_same_thread': False}, poolclass=StaticPool)
     @event.listens_for(engine, 'connect')
     def configure(conn, _):
         conn.isolation_level = None

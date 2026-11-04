@@ -2,11 +2,13 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 
-from api.deps import get_db, require_permission
+from api.deps import get_db, require_permission, require_superadmin
 from api.audit_logger import log_audit
 from db.models.rbac import Role, Permission, RolePermission
 from schemas.rbac import RoleSchema, RoleCreate, RoleUpdate, PermissionSchema
 from db.models.user import User
+from api.deps import get_user_permissions
+from core.access import is_global_admin, company_id
 
 router = APIRouter()
 
@@ -14,24 +16,34 @@ router = APIRouter()
 @router.get("/permissions", response_model=List[PermissionSchema])
 def list_permissions(
     db: Session = Depends(get_db),
-    _ = Depends(require_permission("roles:manage"))
+    current_user = Depends(require_permission("roles:manage"))
 ) -> Any:
-    return db.query(Permission).all()
+    query = db.query(Permission)
+    if not is_global_admin(current_user):
+        company_id(current_user)
+        query = query.filter(Permission.name.in_(get_user_permissions(db, current_user)))
+    return query.all()
 
 
 @router.get("", response_model=List[RoleSchema])
 def list_roles(
     db: Session = Depends(get_db),
-    _ = Depends(require_permission("roles:manage"))
+    current_user = Depends(require_permission("roles:manage"))
 ) -> Any:
-    return db.query(Role).options(joinedload(Role.permissions)).all()
+    roles = db.query(Role).options(joinedload(Role.permissions)).all()
+    if is_global_admin(current_user):
+        return roles
+    company_id(current_user)
+    allowed = get_user_permissions(db, current_user)
+    return [role for role in roles if role.name != 'superadmin'
+            and {p.name for p in role.permissions}.issubset(allowed)]
 
 
 @router.post("", response_model=RoleSchema, status_code=status.HTTP_201_CREATED)
 def create_role(
     *,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("roles:manage")),
+    current_user: User = Depends(require_superadmin),
     role_in: RoleCreate
 ) -> Any:
     existing = db.query(Role).filter(Role.name == role_in.name).first()
@@ -59,7 +71,7 @@ def create_role(
 def update_role(
     *,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("roles:manage")),
+    current_user: User = Depends(require_superadmin),
     role_id: int,
     role_in: RoleUpdate
 ) -> Any:
@@ -100,7 +112,7 @@ def update_role(
 def delete_role(
     *,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("roles:manage")),
+    current_user: User = Depends(require_superadmin),
     role_id: int
 ) -> Any:
     role = db.query(Role).filter(Role.id == role_id).first()

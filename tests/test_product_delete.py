@@ -7,6 +7,7 @@ from db.models.branch import Branch, Inventory
 from db.models.product import Product, ProductVariant
 from db.models.reservation import Reservation, ReservationItem
 from db.models.sale import Order, OrderItem
+from db.models import User, Tenant
 
 
 def test_delete_product_preserves_related_records():
@@ -14,8 +15,13 @@ def test_delete_product_preserves_related_records():
     Base.metadata.create_all(bind=engine)
 
     with Session(engine) as db:
+        tenant = Tenant(name='Delete test', subdomain='delete-test')
+        db.add(tenant); db.flush()
+        user = User(tenant_id=tenant.id, email='admin@example.com', hashed_password='unused')
+        db.add(user); db.flush()
         branch = Branch(name="Sucursal 1", address="Calle 1")
         product = Product(name="Camisa", description="Test", base_price=120.0, category_id=None, season="2026")
+        product.tenant_id = tenant.id
         variant = ProductVariant(product=product, size="M", color="Blanco", sku="CAM-TEST-M")
         order = Order(user_id=1, branch_id=1, total_amount=120.0)
         reservation = Reservation(user_id=1, branch_id=1)
@@ -28,7 +34,7 @@ def test_delete_product_preserves_related_records():
         db.add(ReservationItem(reservation_id=reservation.id, variant_id=variant.id, quantity=1, unit_price=120.0))
         db.commit()
 
-        deleted = delete_product(db=db, product_id=product.id, current_user=object())
+        deleted = delete_product(db=db, product_id=product.id, current_user=user)
 
         assert deleted.id == product.id
         assert not deleted.is_active

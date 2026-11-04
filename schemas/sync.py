@@ -1,3 +1,4 @@
+from schemas.product import GarmentAttributes
 from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -16,7 +17,7 @@ class SyncVariantItem(BaseModel):
     image_url: Optional[str] = None
 
 
-class SyncProductItem(BaseModel):
+class SyncProductItem(GarmentAttributes):
     id: int
     name: str
     description: Optional[str] = None

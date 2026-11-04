@@ -21,7 +21,7 @@ class SubscriptionPlanSchema(BaseModel):
 class TenantBase(BaseModel):
     name: str = Field(..., min_length=2, max_length=150)
     subdomain: str = Field(..., min_length=2, max_length=50)
-    exchange_window_days: int = Field(30, ge=1, le=365)
+    exchange_window_days: int = Field(2, ge=1, le=2)
     is_active: bool = True
 
 
@@ -35,7 +35,7 @@ class TenantCreate(TenantBase):
 class TenantUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=150)
     subdomain: Optional[str] = Field(None, min_length=2, max_length=50)
-    exchange_window_days: Optional[int] = Field(None, ge=1, le=365)
+    exchange_window_days: Optional[int] = Field(None, ge=1, le=2)
     is_active: Optional[bool] = None
 
 
@@ -57,7 +57,7 @@ class TenantDetailSchema(TenantSchema):
 
 
 class ChangePlanRequest(BaseModel):
-    plan_code: str = Field(..., description="Código del nuevo plan ('basic', 'professional')")
+    plan_code: str = Field(..., description="Código del nuevo plan ('basic', 'professional', 'enterprise')")
 
 
 class SubscriptionUsage(BaseModel):

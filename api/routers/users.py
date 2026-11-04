@@ -12,6 +12,9 @@ from core import security
 from db.models.user import User
 from db.models.rbac import Role, UserPermission
 from db.models.branch import Branch
+from core.access import check_assign_role, check_user_target, is_global_admin
+from api.deps import get_user_permissions
+from db.models.rbac import Permission
 from schemas.user import (
     User as UserSchema,
     UserCreateByAdmin,
@@ -65,6 +68,9 @@ def create_user_by_admin(
     role = db.query(Role).filter(Role.id == user_in.role_id).first()
     if not role:
         raise HTTPException(status_code=404, detail="Rol no encontrado.")
+    check_assign_role(db, current_user, role)
+    if role.name == 'superadmin' and current_user.tenant_id is not None:
+        raise HTTPException(403, 'Los roles globales no pueden asignarse a una empresa.')
 
     # Logica simple para obligar branch a encargados/cajeros
     if role.name in ("cajero", "encargado") and not user_in.branch_id:
@@ -129,6 +135,16 @@ def update_user(
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
 
     # Protect Admin role logic
+    check_user_target(current_user, user)
+    if user_in.role_id is not None:
+        assigned_role = db.get(Role, user_in.role_id)
+        check_assign_role(db, current_user, assigned_role)
+        if assigned_role.name == 'superadmin' and user.tenant_id is not None:
+            raise HTTPException(403, 'Los roles globales no pueden asignarse a una empresa.')
+    if user_in.branch_id is not None:
+        assigned_branch = db.get(Branch, user_in.branch_id)
+        if not assigned_branch or assigned_branch.tenant_id != user.tenant_id:
+            raise HTTPException(400, 'Sucursal ajena a la empresa del usuario.')
     if user.role and user.role.name == "admin" and user_in.role_id is not None and user_in.role_id != user.role_id:
         admin_count = db.query(User).join(Role).filter(Role.name == "admin", User.is_active == True).count()
         if admin_count <= 1:
@@ -165,6 +181,12 @@ def update_user_permissions(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    check_user_target(current_user, user)
+    permission = db.get(Permission, permission_id)
+    if not permission:
+        raise HTTPException(404, 'Permiso no encontrado.')
+    if not is_global_admin(current_user) and permission.name not in get_user_permissions(db, current_user):
+        raise HTTPException(403, 'No puedes administrar un permiso que no posees.')
         
     # Check if admin is trying to be modified (Admin has all perms by default)
     if user.role and user.role.name == "admin":
@@ -200,6 +222,7 @@ def deactivate_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    check_user_target(current_user, user)
 
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="No puedes desactivarte a ti mismo.")

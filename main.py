@@ -163,3 +163,6 @@ app.include_router(operations.router, prefix=f"{settings.API_V1_STR}/operations"
 app.include_router(saas.router, prefix=f"{settings.API_V1_STR}/saas", tags=["☁️ SaaS & Planes"])
 app.include_router(sync.router, prefix=f"{settings.API_V1_STR}/sync", tags=["⚡ Sincronización Offline"])
 
+from api.routers import analytics
+app.include_router(analytics.router, prefix=f"{settings.API_V1_STR}/analytics", tags=['Reportes IA y ML'])
+

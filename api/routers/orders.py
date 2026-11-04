@@ -12,6 +12,11 @@ from db.models.reservation import Reservation, ReservationStatus
 from db.models.operations import InventoryMovement
 from schemas.sale import Order as OrderSchema, OrderCreate, GarmentExchangeCreate, GarmentExchangeSchema
 from core.commerce import quantities, price_variant, move_stock, check_branch, available_branch, money
+from core.access import company_id
+from core.exchanges import quote as exchange_quote
+from schemas.sale import GarmentExchangeQuoteRequest
+import hashlib
+import json
 
 router = APIRouter()
 
@@ -44,6 +49,7 @@ def get_order(order_id: int, db: Session = Depends(get_db), current_user=Depends
 @router.post('', response_model=OrderSchema, status_code=201)
 def create_order(*, db: Session = Depends(get_db), order_in: OrderCreate,
                  current_user=Depends(get_current_active_user)):
+    tenant_id = company_id(current_user)
     request_key = f'{current_user.id}:{order_in.request_key}' if order_in.request_key else None
     if request_key:
         previous = db.query(Order).filter(Order.request_key == request_key).first()
@@ -70,7 +76,7 @@ def create_order(*, db: Session = Depends(get_db), order_in: OrderCreate,
             if not order_in.reservation_id:
                 raise HTTPException(400, 'Indica la reserva a cobrar')
             reservation = db.query(Reservation).filter(Reservation.id == order_in.reservation_id).with_for_update().first()
-            if not reservation or reservation.branch_id != branch_id:
+            if not reservation or reservation.tenant_id != tenant_id or reservation.branch_id != branch_id:
                 raise HTTPException(400, 'Reserva no encontrada en esta sucursal')
             if reservation.status not in (ReservationStatus.pending, ReservationStatus.confirmed):
                 raise HTTPException(409, 'La reserva ya fue cerrada')
@@ -86,21 +92,22 @@ def create_order(*, db: Session = Depends(get_db), order_in: OrderCreate,
             if order_in.payment_method.value not in ('tarjeta', 'qr', 'transferencia'):
                 raise HTTPException(400, 'Selecciona un pago digital o realiza una reserva')
         if branch_id is None:
-            branch_id = available_branch(db, counts)
+            branch_id = available_branch(db, counts, tenant_id)
         else:
             from db.models.branch import Branch
             branch = db.get(Branch, branch_id)
-            if not branch or not branch.is_active:
+            if not branch or branch.tenant_id != tenant_id or not branch.is_active:
                 raise HTTPException(400, 'Sucursal no disponible')
         res_prices = {}
         if reservation:
             res_prices = {item.variant_id: money(item.unit_price) for item in reservation.items if item.unit_price is not None}
         priced = []
         for vid, qty in counts.items():
+            variant, catalog_price = price_variant(db, vid, tenant_id)
             if reservation and vid in res_prices:
                 price = res_prices[vid]
             else:
-                price = price_variant(db, vid)[1]
+                price = catalog_price
             priced.append((vid, qty, price))
         order = Order(
             tenant_id=current_user.tenant_id,
@@ -146,7 +153,7 @@ def create_order(*, db: Session = Depends(get_db), order_in: OrderCreate,
 def cancel_order(order_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_active_user)):
     """Cancela una orden online pendiente de pago y libera el stock retenido."""
     try:
-        order = db.query(Order).filter(Order.id == order_id).with_for_update().first()
+        order = orders_query(db, current_user).filter(Order.id == order_id).with_for_update().first()
         if not order:
             raise HTTPException(404, 'Orden no encontrada')
         perms = get_user_permissions(db, current_user)
@@ -186,6 +193,8 @@ def return_order(order_id: int, db: Session = Depends(get_db), current_user=Depe
             return order
         if not order.is_paid:
             raise HTTPException(409, 'Solo puedes devolver una venta pagada')
+        if db.query(GarmentExchange).filter_by(order_id=order.id, status='APPROVED').first():
+            raise HTTPException(409, 'La venta tiene cambios registrados; no se puede devolver su inventario original completo.')
         for vid, qty in quantities(order.items).items():
             move_stock(db, order.branch_id, vid, qty, 'return', current_user.id, f'order:{order.id}')
         order.is_paid = False
@@ -200,121 +209,55 @@ def return_order(order_id: int, db: Session = Depends(get_db), current_user=Depe
 
 # ─── GESTIÓN DE CAMBIOS DE PRENDAS (RNF04 - FASE 2) ──────────────────────────
 
+@router.post('/{order_id}/exchange/quote')
+def quote_exchange(order_id: int, exchange_in: GarmentExchangeQuoteRequest,
+                   db: Session = Depends(get_db), current_user=Depends(require_permission('sales:write'))):
+    order = orders_query(db, current_user).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(404, 'Orden no encontrada')
+    return exchange_quote(db, current_user, order, exchange_in)
+
+
 @router.post('/{order_id}/exchange', response_model=GarmentExchangeSchema)
-def exchange_garment(
-    order_id: int,
-    exchange_in: GarmentExchangeCreate,
-    db: Session = Depends(get_db),
-    current_user = Depends(require_permission('sales:write'))
-):
-    """
-    RNF04 / Fase 2: Realiza el cambio de una prenda por otra variante (talla, color)
-    dentro del plazo configurable de la empresa (exchange_window_days).
-    Valida inventario, consistencia atómica y registra la diferencia de precio.
-    """
+def exchange_garment(order_id: int, exchange_in: GarmentExchangeCreate,
+                     db: Session = Depends(get_db), current_user=Depends(require_permission('sales:write'))):
     try:
+        tenant_id = company_id(current_user)
         order = orders_query(db, current_user).filter(Order.id == order_id).with_for_update().first()
         if not order:
             raise HTTPException(404, 'Orden no encontrada')
-
-        if not order.is_paid:
-            raise HTTPException(400, 'Solo se pueden realizar cambios sobre ventas efectivamente pagadas.')
-
-        if order.payment_status == PaymentStatusEnum.refunded:
-            raise HTTPException(400, 'La venta fue reembolsada; no admite cambios de prendas.')
-
-        # 1. Validar ventana de días configurable del Tenant
-        tenant = order.tenant or db.query(Tenant).filter(Tenant.id == order.tenant_id).first()
-        window_days = tenant.exchange_window_days if tenant else 30
-
-        now = datetime.now(timezone.utc)
-        order_date = order.created_at
-        if order_date.tzinfo is None:
-            order_date = order_date.replace(tzinfo=timezone.utc)
-        elapsed_days = (now - order_date).days
-
-        if elapsed_days > window_days:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Plazo para cambio de prendas vencido ({elapsed_days} días transcurridos desde la compra). "
-                    f"El límite configurado para tu empresa es de {window_days} días."
-                )
-            )
-
-        # 2. Validar que la prenda original esté en la orden y no exceda la cantidad comprada
-        order_item = next((i for i in order.items if i.variant_id == exchange_in.original_variant_id), None)
-        if not order_item:
-            raise HTTPException(400, 'La prenda/variante indicada no pertenece a esta orden.')
-
-        prev_qty = db.query(func.coalesce(func.sum(GarmentExchange.quantity), 0)).filter(
-            GarmentExchange.order_id == order.id,
-            GarmentExchange.original_variant_id == exchange_in.original_variant_id,
-            GarmentExchange.status == 'APPROVED',
-        ).scalar()
-
-        if (prev_qty + exchange_in.quantity) > order_item.quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f'No puedes cambiar {exchange_in.quantity} unidades. Compradas: {order_item.quantity}, '
-                    f'ya cambiadas previamente: {prev_qty}.'
-                )
-            )
-
-        # 3. Validar sucursal donde se hace el cambio físico
-        check_branch(db, current_user, exchange_in.branch_id)
-
-        # 4. Obtener precios y calcular diferencia económica
-        orig_variant, orig_price = price_variant(db, exchange_in.original_variant_id)
-        new_variant, new_price = price_variant(db, exchange_in.new_variant_id)
-        price_diff = float((new_price - orig_price) * exchange_in.quantity)
-
-        # 5. Movimientos atómicos de stock
-        # Reingreso de la prenda devuelta a la sucursal
-        move_stock(
-            db,
-            exchange_in.branch_id,
-            exchange_in.original_variant_id,
-            +exchange_in.quantity,
-            'CAMBIO_DEVOLUCION',
-            current_user.id,
-            f'exchange:order:{order.id}',
-            tenant_id=order.tenant_id,
-        )
-        # Egreso de la nueva prenda entregada al cliente
-        move_stock(
-            db,
-            exchange_in.branch_id,
-            exchange_in.new_variant_id,
-            -exchange_in.quantity,
-            'CAMBIO_ENTREGA',
-            current_user.id,
-            f'exchange:order:{order.id}',
-            tenant_id=order.tenant_id,
-        )
-
-        # 6. Registrar auditoría de cambio
-        exchange = GarmentExchange(
-            tenant_id=order.tenant_id,
-            order_id=order.id,
-            branch_id=exchange_in.branch_id,
-            user_id=current_user.id,
-            original_variant_id=exchange_in.original_variant_id,
-            new_variant_id=exchange_in.new_variant_id,
-            quantity=exchange_in.quantity,
-            reason=exchange_in.reason,
-            difference_amount=price_diff,
-            status='APPROVED',
-        )
-        db.add(exchange)
-        db.commit()
-        db.refresh(exchange)
-
-        result = GarmentExchangeSchema.model_validate(exchange)
-        result.days_since_purchase = elapsed_days
-        result.exchange_window_days = window_days
-        return result
+        fingerprint = hashlib.sha256(json.dumps({'order_id': order_id,
+            **exchange_in.model_dump(exclude={'request_key'})}, sort_keys=True).encode()).hexdigest()
+        previous = db.query(GarmentExchange).filter_by(tenant_id=tenant_id, request_key=exchange_in.request_key).first()
+        if previous:
+            if previous.order_id != order_id or previous.request_fingerprint != fingerprint:
+                raise HTTPException(409, 'La clave de solicitud ya corresponde a otro cambio o importe.')
+            return previous
+        result = exchange_quote(db, current_user, order, exchange_in)
+        if money(exchange_in.confirmed_difference_amount) != money(result['difference_amount']):
+            raise HTTPException(409, 'El precio cambió. Consulta de nuevo la diferencia antes de confirmar.')
+        if not exchange_in.settlement_confirmed:
+            raise HTTPException(400, 'Confirma la recepción de la prenda y el cobro o devolución de la diferencia.')
+        # Deterministic inventory locking order reduces deadlocks between cashiers.
+        from db.models.branch import Inventory
+        db.query(Inventory).filter(Inventory.tenant_id == tenant_id,
+            Inventory.branch_id == exchange_in.branch_id,
+            Inventory.variant_id.in_([exchange_in.original_variant_id, exchange_in.new_variant_id])
+        ).order_by(Inventory.variant_id).with_for_update().all()
+        move_stock(db, exchange_in.branch_id, exchange_in.original_variant_id, exchange_in.quantity,
+                   'CAMBIO_DEVOLUCION', current_user.id, f'exchange:{exchange_in.request_key}', tenant_id)
+        move_stock(db, exchange_in.branch_id, exchange_in.new_variant_id, -exchange_in.quantity,
+                   'CAMBIO_ENTREGA', current_user.id, f'exchange:{exchange_in.request_key}', tenant_id)
+        exchange = GarmentExchange(tenant_id=tenant_id, order_id=order.id, branch_id=exchange_in.branch_id,
+            user_id=current_user.id, original_variant_id=exchange_in.original_variant_id,
+            new_variant_id=exchange_in.new_variant_id, quantity=exchange_in.quantity, reason=exchange_in.reason,
+            difference_amount=result['difference_amount'], status='APPROVED', request_key=exchange_in.request_key,
+            request_fingerprint=fingerprint, settlement_method=result['settlement_method'])
+        db.add(exchange); db.commit(); db.refresh(exchange)
+        return exchange
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'El cambio ya fue registrado o hay una solicitud con esa clave. Reintenta la misma solicitud.')
     except Exception:
         db.rollback()
         raise
@@ -333,7 +276,7 @@ def list_order_exchanges(
 
     exchanges = db.query(GarmentExchange).filter(GarmentExchange.order_id == order_id).order_by(GarmentExchange.id.desc()).all()
     tenant = order.tenant or db.query(Tenant).filter(Tenant.id == order.tenant_id).first()
-    window_days = tenant.exchange_window_days if tenant else 30
+    window_days = min(tenant.exchange_window_days, 2) if tenant else 2
 
     results = []
     for ex in exchanges:
@@ -354,6 +297,12 @@ def list_all_exchanges(
     query = db.query(GarmentExchange)
     if current_user.tenant_id is not None:
         query = query.filter(GarmentExchange.tenant_id == current_user.tenant_id)
+    if 'branches:write' not in get_user_permissions(db, current_user):
+        check_branch(db, current_user, current_user.branch_id)
+        query = query.filter(GarmentExchange.branch_id == current_user.branch_id)
     return query.order_by(GarmentExchange.id.desc()).offset(skip).limit(limit).all()
 
 
+
+from api.routers.full_returns import router as full_returns_router
+router.include_router(full_returns_router)

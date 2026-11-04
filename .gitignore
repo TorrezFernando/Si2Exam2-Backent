@@ -48,11 +48,16 @@ htmlcov/
 # ─── Misc ──────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-uploads/
+uploads/
+
 
 # Cloud & Uploads
 uploads/
-
+
+
 
 .test-tmp-*/
+.test-pg-*/
 scratch/
+
+ml_engine/artifacts/

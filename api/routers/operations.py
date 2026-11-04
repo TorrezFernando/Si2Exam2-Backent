@@ -8,6 +8,7 @@ from core.commerce import check_branch, move_stock
 from db.models.operations import Supplier, Season, Collection, InventoryMovement
 from db.models.product import Category, ProductVariant
 from db.models.branch import Inventory
+from core.access import company_id
 
 router = APIRouter()
 MODELS = {'suppliers': Supplier, 'seasons': Season, 'collections': Collection, 'categories': Category}
@@ -28,13 +29,14 @@ def model_for(kind):
 @router.get('/masters/{kind}')
 def list_master(kind: str, db: Session = Depends(get_db), user=Depends(require_permission('catalog:write', 'inventory:write'))):
     model = model_for(kind)
-    return db.query(model).order_by(model.name).all()
+    return db.query(model).filter(model.tenant_id == company_id(user)).order_by(model.name).all()
 
 
 @router.post('/masters/{kind}', status_code=201)
 def create_master(kind: str, data: MasterData, db: Session = Depends(get_db), user=Depends(require_permission('catalog:write'))):
     model = model_for(kind)
     obj = model(**{k: v for k, v in data.model_dump().items() if hasattr(model, k)})
+    obj.tenant_id = company_id(user)
     try:
         db.add(obj)
         db.commit()
@@ -48,7 +50,7 @@ def create_master(kind: str, data: MasterData, db: Session = Depends(get_db), us
 @router.patch('/masters/{kind}/{record_id}')
 def update_master(kind: str, record_id: int, data: MasterData, db: Session = Depends(get_db), user=Depends(require_permission('catalog:write'))):
     model = model_for(kind)
-    obj = db.get(model, record_id)
+    obj = db.query(model).filter(model.id == record_id, model.tenant_id == company_id(user)).first()
     if not obj:
         raise HTTPException(404, 'Registro no encontrado')
     for key, value in data.model_dump(exclude_unset=True).items():
@@ -66,7 +68,7 @@ def update_master(kind: str, record_id: int, data: MasterData, db: Session = Dep
 @router.get('/movements')
 def list_movements(db: Session = Depends(get_db), branch_id: Optional[int] = None,
     limit: int = Query(100, ge=1, le=500), user=Depends(require_permission('inventory:read', 'inventory:write'))):
-    query = db.query(InventoryMovement)
+    query = db.query(InventoryMovement).filter(InventoryMovement.tenant_id == company_id(user))
     if 'branches:write' not in get_user_permissions(db, user):
         check_branch(db, user, user.branch_id)
         branch_id = user.branch_id
@@ -90,11 +92,12 @@ def create_movement(data: MovementInput, db: Session = Depends(get_db), user=Dep
         from db.models.branch import Branch
         db.query(Branch).filter(Branch.id == data.branch_id).with_for_update().first()
         check_branch(db, user, data.branch_id)
-        if not db.get(ProductVariant, data.variant_id):
+        variant = db.get(ProductVariant, data.variant_id)
+        if not variant or variant.tenant_id != company_id(user) or variant.product.tenant_id != company_id(user):
             raise HTTPException(404, 'Variante no encontrada')
         inventory = db.query(Inventory).filter_by(branch_id=data.branch_id, variant_id=data.variant_id).first()
         if not inventory:
-            db.add(Inventory(branch_id=data.branch_id, variant_id=data.variant_id, stock=0))
+            db.add(Inventory(tenant_id=company_id(user), branch_id=data.branch_id, variant_id=data.variant_id, stock=0))
             db.flush()
         delta = -data.quantity if data.kind == 'adjustment_out' else data.quantity
         move_stock(db, data.branch_id, data.variant_id, delta, data.kind, user.id, data.reference)
@@ -103,3 +106,6 @@ def create_movement(data: MovementInput, db: Session = Depends(get_db), user=Dep
     except Exception:
         db.rollback()
         raise
+
+from api.routers.incoming import router as incoming_router
+router.include_router(incoming_router, prefix="/incoming")

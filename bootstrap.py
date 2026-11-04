@@ -36,26 +36,14 @@ def bootstrap():
         db.flush()
         # Inicializar Planes de Suscripción
         from db.models.tenant import Tenant, SubscriptionPlan, Subscription
-        plan_basic = db.query(SubscriptionPlan).filter_by(code='basic').first()
-        if not plan_basic:
-            plan_basic = SubscriptionPlan(
-                name='Plan Básico', code='basic', max_branches=2,
-                has_ai_reports=False, has_offline_sync=True, price=29.99
-            )
-            db.add(plan_basic)
-        plan_pro = db.query(SubscriptionPlan).filter_by(code='professional').first()
-        if not plan_pro:
-            plan_pro = SubscriptionPlan(
-                name='Plan Profesional', code='professional', max_branches=10,
-                has_ai_reports=True, has_offline_sync=True, price=99.99
-            )
-            db.add(plan_pro)
-        db.flush()
+        from core.subscription_plans import ensure_plans
+        plans = ensure_plans(db)
+        plan_basic, plan_pro = plans['basic'], plans['professional']
 
         # Tenant inicial
         tenant = db.query(Tenant).filter_by(subdomain='fashionstore').first()
         if not tenant:
-            tenant = Tenant(name='FashionStore Corp', subdomain='fashionstore', is_active=True, exchange_window_days=30)
+            tenant = Tenant(name='FashionStore Corp', subdomain='fashionstore', is_active=True, exchange_window_days=2)
             db.add(tenant)
             db.flush()
             sub = Subscription(tenant_id=tenant.id, plan_id=plan_pro.id, status='active')

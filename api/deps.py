@@ -67,6 +67,8 @@ def get_current_active_user(
     """Valida que el usuario esté activo."""
     if not current_user.is_active:
         raise HTTPException(status_code=401, detail="Usuario inactivo.")
+    if current_user.role and current_user.role.name == 'superadmin' and current_user.tenant_id is not None:
+        raise HTTPException(status_code=403, detail='Asignación de rol global inválida.')
     return current_user
 
 oauth2_scheme_optional = OAuth2PasswordBearer(
@@ -148,7 +150,7 @@ def require_superadmin(
     current_user: User = Depends(get_current_active_user),
 ) -> User:
     """Restringe el acceso exclusivamente al Superadministrador Global SaaS."""
-    if not current_user.role or current_user.role.name != "superadmin":
+    if not current_user.role or current_user.role.name != "superadmin" or current_user.tenant_id is not None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso restringido únicamente a Superadministradores de la plataforma SaaS.",
@@ -216,6 +218,8 @@ def verify_branch_limit(
         return
 
     tenant = get_current_tenant(request, current_user, db)
+    # Serialize branch creation/reactivation per company until the caller commits.
+    db.query(Tenant).filter(Tenant.id == tenant.id).with_for_update().first()
     sub = tenant.active_subscription
     if not sub or not sub.plan:
         raise HTTPException(
@@ -233,7 +237,7 @@ def verify_branch_limit(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
                 f"Límite de sucursales alcanzado ({sub.plan.max_branches}) "
-                f"para el {sub.plan.name}. Actualiza al Plan Profesional para habilitar hasta 10 sucursales."
+                f"para el {sub.plan.name}. Consulta los planes disponibles o desactiva una sucursal antes de continuar."
             ),
         )
 

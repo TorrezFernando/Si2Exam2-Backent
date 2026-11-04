@@ -16,7 +16,7 @@ class Tenant(Base):
     name = Column(String, nullable=False)
     subdomain = Column(String, unique=True, index=True, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
-    exchange_window_days = Column(Integer, default=30, nullable=False)  # Plazo configurable para cambio de prendas
+    exchange_window_days = Column(Integer, default=2, nullable=False)  # Plazo configurable para cambio de prendas
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -45,7 +45,7 @@ class SubscriptionPlan(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    code = Column(String, unique=True, index=True, nullable=False)  # 'basic', 'professional'
+    code = Column(String, unique=True, index=True, nullable=False)  # 'basic', 'professional', 'enterprise'
     max_branches = Column(Integer, default=2, nullable=False)
     has_ai_reports = Column(Boolean, default=False, nullable=False)
     has_offline_sync = Column(Boolean, default=True, nullable=False)

@@ -6,6 +6,7 @@ from api.deps import get_current_user_optional, get_db
 from db.models.user import User
 from sqlalchemy.orm import Session
 from db.models.product import Product
+from core.storefront import selected_store
 import json
 
 router = APIRouter()
@@ -16,6 +17,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage] = Field(min_length=1, max_length=30)
+    store: str | None = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -32,7 +34,10 @@ async def chat_with_ai(
     from core.config import settings
     from google import genai
     
-    products = db.query(Product).filter(Product.is_active.is_(True)).limit(50).all()
+    tenant = selected_store(db, current_user, request.store)
+    if tenant is None:
+        return ChatResponse(response='Selecciona una tienda o inicia sesión para consultar su catálogo.')
+    products = db.query(Product).filter(Product.is_active.is_(True), Product.tenant_id == tenant.id).limit(50).all()
     catalog_context = "Catálogo de productos disponibles:\n"
     for p in products:
         cat = p.category.name if p.category else "Otros"
@@ -57,7 +62,7 @@ async def chat_with_ai(
         
         prompt = f"{system_instruction}\n\nHistorial de chat:\n{conversation}\nAI:"
         
-        models_to_try = [settings.GEMINI_TEXT_MODEL]
+        models_to_try = [settings.GEMINI_TEXT_MODEL or 'gemini-3.5-flash']
         response = None
         last_error = None
         for model_name in models_to_try:

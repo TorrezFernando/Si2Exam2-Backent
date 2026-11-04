@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from db.database import Base
 from db.models import User, Role, Permission, Branch, Product, ProductVariant, Inventory, Order, OrderItem, Reservation, InventoryMovement
 from db.models.rbac import UserPermission
+from db.models.tenant import Tenant
 from db.models.sale import OrderTypeEnum, PaymentStatusEnum
 from schemas.sale import OrderCreate
 from schemas.reservation import ReservationCreate, ReservationUpdate
@@ -25,6 +26,8 @@ def shop():
         conn.execute('PRAGMA foreign_keys=ON')
     Base.metadata.create_all(engine)
     with Session(engine) as db:
+        tenant = Tenant(name='Commerce test', subdomain='commerce-test')
+        db.add(tenant); db.flush()
         branch = Branch(name='A', address='A'); other = Branch(name='B', address='B')
         role = Role(name='cajero', permissions=[Permission(name='sales:write'), Permission(name='reservations:write')])
         customer = User(email='customer@example.com', hashed_password='unused', role=Role(name='cliente'))
@@ -33,10 +36,13 @@ def shop():
         a = ProductVariant(product=product, size='M', color='Azul', sku='A')
         b = ProductVariant(product=product, size='L', color='Azul', sku='B', price_override=150)
         db.add_all([branch, other, customer, cashier, product, a, b]); db.flush()
+        for obj in [branch, other, customer, cashier, product, a, b]:
+            obj.tenant_id = tenant.id
         db.add_all([Inventory(branch_id=branch.id, variant_id=a.id, stock=5),
                     Inventory(branch_id=branch.id, variant_id=b.id, stock=1),
                     Inventory(branch_id=other.id, variant_id=a.id, stock=20)])
         db.commit()
+        db.query(Inventory).update({'tenant_id': tenant.id}); db.commit()
         yield SimpleNamespace(db=db, branch=branch, other=other, customer=customer, cashier=cashier, product=product, a=a, b=b)
 
 

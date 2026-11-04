@@ -17,6 +17,7 @@ from schemas.product import (
 )
 from core.ai_service import generate_recommendations
 from core.commerce import check_branch
+from core.access import company_id
 from db.models.operations import Supplier, Season, Collection, InventoryMovement
 
 from core.storefront import selected_store, storefront_metadata
@@ -175,7 +176,7 @@ def interact_with_product(
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """Registra una interacción (vista) con un producto para mejorar las recomendaciones."""
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = db.query(Product).filter(Product.id == product_id, Product.tenant_id == company_id(current_user)).first()
     if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
         
@@ -256,14 +257,17 @@ def create_product(
 ) -> Any:
     """Crea un nuevo producto (Admin/Encargado)."""
     if product_in.category_id:
-        category = db.query(Category).filter(Category.id == product_in.category_id).first()
+        category = db.query(Category).filter(Category.id == product_in.category_id, Category.tenant_id == company_id(current_user)).first()
         if not category:
             raise HTTPException(status_code=404, detail="Categoría no encontrada")
 
-    validate_references(db, product_in)
+    validate_references(db, product_in, current_user)
     product = Product(
+        tenant_id=company_id(current_user),
         name=product_in.name,
         description=product_in.description,
+        promotion_percent=product_in.promotion_percent, promotion_start=product_in.promotion_start, promotion_end=product_in.promotion_end,
+        weight_grams=product_in.weight_grams, fabric_type=product_in.fabric_type, design=product_in.design,
         base_price=product_in.base_price,
         category_id=product_in.category_id,
         season=product_in.season,
@@ -282,9 +286,9 @@ def create_product(
     elif product_in.branch_id:
         target_branch_id = product_in.branch_id
 
-    active_branches = db.query(Branch).filter(Branch.is_active == True).all()
+    active_branches = db.query(Branch).filter(Branch.is_active == True, Branch.tenant_id == company_id(current_user)).all()
     if not active_branches:
-        active_branches = db.query(Branch).all()
+        active_branches = db.query(Branch).filter(Branch.tenant_id == company_id(current_user)).all()
 
     for variant_data in product_in.variants or []:
         normalized_size = (variant_data.size or "").strip() or "M"
@@ -292,7 +296,7 @@ def create_product(
 
         generated_sku = generate_unique_sku(db, product.name, normalized_size, normalized_color, variant_data.sku)
         variant = ProductVariant(
-            product_id=product.id,
+            product_id=product.id, tenant_id=company_id(current_user),
             size=normalized_size,
             color=normalized_color,
             sku=generated_sku,
@@ -315,9 +319,9 @@ def create_product(
                 stock = quantity if branch.id == variant_branch_id else 0
             else:
                 stock = quantity
-            db.add(Inventory(branch_id=branch.id, variant_id=variant.id, stock=stock))
+            db.add(Inventory(tenant_id=company_id(current_user), branch_id=branch.id, variant_id=variant.id, stock=stock))
             if stock:
-                db.add(InventoryMovement(branch_id=branch.id, variant_id=variant.id, quantity=stock, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
+                db.add(InventoryMovement(tenant_id=company_id(current_user), branch_id=branch.id, variant_id=variant.id, quantity=stock, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
 
     db.commit()
     db.refresh(product)
@@ -333,17 +337,29 @@ def update_product(
     current_user: User = Depends(require_permission("catalog:write", "inventory:write"))
 ) -> Any:
     """Actualiza un producto (Admin/Encargado)."""
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = db.query(Product).filter(Product.id == product_id, Product.tenant_id == company_id(current_user)).first()
     if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
     if product_in.category_id is not None:
-        category = db.query(Category).filter(Category.id == product_in.category_id).first()
+        category = db.query(Category).filter(Category.id == product_in.category_id, Category.tenant_id == company_id(current_user)).first()
         if not category:
             raise HTTPException(status_code=404, detail="Categoría no encontrada")
 
-    validate_references(db, product_in)
+    validate_references(db, product_in, current_user)
     update_data = product_in.model_dump(exclude_unset=True)
+    from schemas.product import PromotionConfig
+    from pydantic import ValidationError
+    from datetime import timezone
+    promotion = {key: update_data.get(key, getattr(product, key)) for key in ('promotion_percent', 'promotion_start', 'promotion_end')}
+    for key in ('promotion_start', 'promotion_end'):
+        if promotion[key] is not None and promotion[key].tzinfo is None:
+            promotion[key] = promotion[key].replace(tzinfo=timezone.utc)
+    try:
+        PromotionConfig(**promotion)
+    except ValidationError:
+        raise HTTPException(422, 'Promoción inválida: indica porcentaje, inicio y fin posterior, o vacía los tres campos.')
+
     for field, value in update_data.items():
         if field in ("variants", "branch_id"):
             continue
@@ -355,9 +371,9 @@ def update_product(
     encargado_branch_id = current_user.branch_id if is_encargado else None
 
     if product_in.variants is not None:
-        active_branches = db.query(Branch).filter(Branch.is_active == True).all()
+        active_branches = db.query(Branch).filter(Branch.is_active == True, Branch.tenant_id == company_id(current_user)).all()
         if not active_branches:
-            active_branches = db.query(Branch).all()
+            active_branches = db.query(Branch).filter(Branch.tenant_id == company_id(current_user)).all()
 
         for variant_data in product_in.variants:
             normalized_size = (variant_data.size or "").strip() or "M"
@@ -382,7 +398,7 @@ def update_product(
             if variant is None:
                 generated_sku = generate_unique_sku(db, product.name, normalized_size, normalized_color, variant_data.sku)
                 variant = ProductVariant(
-                    product_id=product.id,
+                    product_id=product.id, tenant_id=company_id(current_user),
                     size=normalized_size,
                     color=normalized_color,
                     sku=generated_sku,
@@ -416,8 +432,8 @@ def update_product(
                         if inventory:
                             record_adjustment(db, inventory, stock_value, current_user.id)
                         else:
-                            db.add(Inventory(branch_id=branch.id, variant_id=variant.id, stock=stock_value))
-                            db.add(InventoryMovement(branch_id=branch.id, variant_id=variant.id, quantity=stock_value, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
+                            db.add(Inventory(tenant_id=company_id(current_user), branch_id=branch.id, variant_id=variant.id, stock=stock_value))
+                            db.add(InventoryMovement(tenant_id=company_id(current_user), branch_id=branch.id, variant_id=variant.id, quantity=stock_value, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
                 else:
                     # Admin: update all branches from inv_map (per-branch values)
                     if branch.id in inv_map:
@@ -430,8 +446,8 @@ def update_product(
                     if inventory:
                         record_adjustment(db, inventory, stock_value, current_user.id)
                     else:
-                        db.add(Inventory(branch_id=branch.id, variant_id=variant.id, stock=stock_value))
-                        db.add(InventoryMovement(branch_id=branch.id, variant_id=variant.id, quantity=stock_value, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
+                        db.add(Inventory(tenant_id=company_id(current_user), branch_id=branch.id, variant_id=variant.id, stock=stock_value))
+                        db.add(InventoryMovement(tenant_id=company_id(current_user), branch_id=branch.id, variant_id=variant.id, quantity=stock_value, kind="receipt", user_id=current_user.id, reference=f"product:{product.id}"))
 
     db.commit()
     db.refresh(product)
@@ -445,7 +461,7 @@ def delete_product(
     current_user: User = Depends(require_permission("catalog:write", "inventory:write"))
 ) -> Any:
     """Elimina un producto (Admin/Encargado)."""
-    product = db.query(Product).filter(Product.id == product_id).first()
+    product = db.query(Product).filter(Product.id == product_id, Product.tenant_id == company_id(current_user)).first()
     if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
         
@@ -456,16 +472,23 @@ def delete_product(
     return product
 
 
-def validate_references(db, payload):
+def validate_references(db, payload, user):
+    tenant_id = company_id(user)
     for field, model in [('supplier_id', Supplier), ('season_id', Season), ('collection_id', Collection)]:
         value = getattr(payload, field, None)
-        if value is not None and not db.get(model, value):
-            raise HTTPException(400, f'{field} no existe')
+        if value is not None and not db.query(model).filter(model.id == value, model.tenant_id == tenant_id).first():
+            raise HTTPException(400, f'{field} no existe en tu empresa')
+    branch_ids = {payload.branch_id} if payload.branch_id else set()
+    for variant in payload.variants or []:
+        if variant.branch_id: branch_ids.add(variant.branch_id)
+        branch_ids.update(item.branch_id for item in variant.inventories or [])
+    for branch_id in branch_ids:
+        check_branch(db, user, branch_id)
 
 
 def record_adjustment(db, inventory, stock, user_id):
     delta = stock - inventory.stock
     if delta:
-        db.add(InventoryMovement(branch_id=inventory.branch_id, variant_id=inventory.variant_id,
+        db.add(InventoryMovement(tenant_id=inventory.tenant_id, branch_id=inventory.branch_id, variant_id=inventory.variant_id,
             quantity=delta, kind='adjustment', user_id=user_id, reference='catalog update'))
         inventory.stock = stock

@@ -78,12 +78,18 @@ class Order(OrderBase):
         from_attributes = True
 
 
-class GarmentExchangeCreate(BaseModel):
+class GarmentExchangeQuoteRequest(BaseModel):
     original_variant_id: int = Field(..., gt=0, description="ID de la variante que se devuelve")
     new_variant_id: int = Field(..., gt=0, description="ID de la nueva variante deseada (talla/color)")
     quantity: int = Field(1, ge=1, description="Cantidad de prendas a cambiar")
     branch_id: int = Field(..., gt=0, description="Sucursal donde se realiza el cambio físico")
     reason: Optional[str] = Field("Cambio de talla/color", max_length=255)
+
+
+class GarmentExchangeCreate(GarmentExchangeQuoteRequest):
+    request_key: str = Field(min_length=10, max_length=64)
+    confirmed_difference_amount: float = Field(allow_inf_nan=False)
+    settlement_confirmed: bool = False
 
 
 class GarmentExchangeSchema(BaseModel):
@@ -97,6 +103,8 @@ class GarmentExchangeSchema(BaseModel):
     quantity: int
     reason: Optional[str] = None
     difference_amount: float
+    request_key: Optional[str] = None
+    settlement_method: Optional[str] = None
     status: str
     created_at: datetime
     days_since_purchase: Optional[int] = None

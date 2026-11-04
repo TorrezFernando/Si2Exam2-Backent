@@ -85,7 +85,7 @@ def process_batch(batch, db, user):
                         counts = quantities(op.items)
                         priced = []
                         for vid, qty in counts.items():
-                            variant, price = price_variant(db, vid)
+                            variant, price = price_variant(db, vid, tenant_id)
                             if variant.tenant_id != tenant_id or variant.product.tenant_id != tenant_id:
                                 raise HTTPException(409, 'Variante no autorizada.')
                             priced.append((vid, qty, price))

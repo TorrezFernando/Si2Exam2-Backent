@@ -12,6 +12,7 @@ from api.deps import (
 )
 from api.audit_logger import log_audit
 from core import security
+from core.access import check_company_admin
 from db.models.user import User
 from db.models.tenant import Tenant, SubscriptionPlan, Subscription
 from db.models.branch import Branch
@@ -166,9 +167,12 @@ def create_tenant(
         )
 
     # Buscar plan
-    plan = db.query(SubscriptionPlan).filter(SubscriptionPlan.code == tenant_in.plan_code).first()
+    plan = db.query(SubscriptionPlan).filter(
+        SubscriptionPlan.code == tenant_in.plan_code.strip().lower(),
+        SubscriptionPlan.is_active == True,
+    ).first()
     if not plan:
-        plan = db.query(SubscriptionPlan).filter(SubscriptionPlan.code == "basic").first()
+        raise HTTPException(400, 'El plan solicitado no existe o no está activo.')
 
     # Crear Tenant
     new_tenant = Tenant(
@@ -278,6 +282,7 @@ def update_tenant(
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
     """Actualiza la información de una empresa (Nombre, Subdominio, Plazo de cambios, Estado)."""
+    check_company_admin(db, current_user, tenant_id)
     is_super = bool(current_user.role and current_user.role.name == "superadmin")
     if not is_super and current_user.tenant_id != tenant_id:
         raise HTTPException(status_code=403, detail="No tienes permisos para modificar esta empresa.")
@@ -350,11 +355,12 @@ def change_tenant_plan(
     Actualiza el plan de suscripción de la empresa (Upgrade / Downgrade).
     Accesible para el Superadmin o el Admin de la propia empresa.
     """
+    check_company_admin(db, current_user, tenant_id)
     is_super = bool(current_user.role and current_user.role.name == "superadmin")
     if not is_super and current_user.tenant_id != tenant_id:
         raise HTTPException(status_code=403, detail="No tienes permisos para modificar el plan de esta empresa.")
 
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).with_for_update().first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
 

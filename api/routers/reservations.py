@@ -7,6 +7,7 @@ from db.models.reservation import Reservation, ReservationItem, ReservationStatu
 from db.models.branch import Branch
 from schemas.reservation import Reservation as ReservationSchema, ReservationCreate, ReservationUpdate
 from core.commerce import quantities, price_variant, move_stock, check_branch
+from core.access import company_id
 
 router = APIRouter()
 
@@ -56,6 +57,7 @@ def get_reservation(reservation_id: int, db: Session = Depends(get_db), current_
 @router.post('', response_model=ReservationSchema, status_code=201)
 def create_reservation(*, db: Session = Depends(get_db), reservation_in: ReservationCreate,
                        current_user=Depends(get_current_active_user)):
+    tenant_id = company_id(current_user)
     try:
         branch = db.get(Branch, reservation_in.branch_id)
         if not branch or not branch.is_active:
@@ -69,7 +71,7 @@ def create_reservation(*, db: Session = Depends(get_db), reservation_in: Reserva
         db.add(reservation)
         db.flush()
         for variant_id, quantity in quantities(reservation_in.items).items():
-            _, price = price_variant(db, variant_id)
+            _, price = price_variant(db, variant_id, tenant_id)
             move_stock(db, branch.id, variant_id, -quantity, 'reservation', current_user.id, f'reservation:{reservation.id}')
             db.add(ReservationItem(
                 tenant_id=current_user.tenant_id,

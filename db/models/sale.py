@@ -89,6 +89,7 @@ class GarmentExchange(Base):
     verificando la ventana de cambio (exchange_window_days) e inventario.
     """
     __tablename__ = "garment_exchanges"
+    __table_args__ = (UniqueConstraint('tenant_id', 'request_key', name='uq_exchange_tenant_request'),)
 
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
@@ -102,6 +103,9 @@ class GarmentExchange(Base):
     
     reason = Column(String, nullable=True)  # Ej: 'Cambio de talla', 'Cambio de color', 'Preferencia'
     difference_amount = Column(Float, default=0.0, nullable=False)  # Diferencia de precio (positiva si la nueva prenda es más cara)
+    request_key = Column(String(64), nullable=True)
+    request_fingerprint = Column(String(64), nullable=True)
+    settlement_method = Column(String(20), nullable=True)  # cash / none; NULL for legacy records
     status = Column(String, default="APPROVED", nullable=False)      # 'APPROVED', 'REJECTED'
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

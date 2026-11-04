@@ -1,5 +1,5 @@
 from typing import Any, List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 
 from api.deps import (
@@ -70,6 +70,7 @@ def create_branch(
 @router.patch("/{branch_id}", response_model=BranchSchema)
 def update_branch(
     *,
+    request: Request,
     db: Session = Depends(get_db),
     branch_id: int,
     branch_in: BranchUpdate,
@@ -82,6 +83,8 @@ def update_branch(
     branch = query.first()
     if not branch:
         raise HTTPException(status_code=404, detail="Sucursal no encontrada")
+    if branch_in.is_active is True and not branch.is_active:
+        verify_branch_limit(request, current_user, db)
         
     update_data = branch_in.model_dump(exclude_unset=True)
     # Prohibir modificar tenant_id

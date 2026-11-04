@@ -7,13 +7,17 @@ from db.models.product import Product, ProductVariant
 from api.routers.products import create_product, update_product
 from schemas.product import ProductCreate, ProductUpdate
 from db.models import User, Role, Permission
+from db.models.tenant import Tenant
 
 
 def admin(db):
     user = db.query(User).first()
     if user:
         return user
-    user = User(email='admin@example.com', hashed_password='unused', role=Role(name='admin', permissions=[Permission(name='branches:write')]))
+    tenant = Tenant(name='Products test', subdomain='products-test')
+    db.add(tenant); db.flush()
+    db.query(Branch).update({'tenant_id': tenant.id})
+    user = User(tenant_id=tenant.id, email='admin@example.com', hashed_password='unused', role=Role(name='admin', permissions=[Permission(name='branches:write')]))
     db.add(user)
     db.commit()
     return user

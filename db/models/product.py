@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Float, Text
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Float, Text, DateTime
 from sqlalchemy.orm import relationship
 from db.database import Base
 
@@ -20,6 +20,23 @@ class Product(Base):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     name = Column(String, index=True, nullable=False)
     description = Column(Text)
+    promotion_percent = Column(Float, nullable=True)
+    promotion_start = Column(DateTime(timezone=True), nullable=True)
+    promotion_end = Column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def effective_price(self):
+        from core.pricing import effective
+        return effective(self, self.base_price)
+
+    @property
+    def promotion_active(self):
+        from core.pricing import active
+        return active(self)
+
+    weight_grams = Column(Float, nullable=True)
+    fabric_type = Column(String(100), nullable=True)
+    design = Column(String(255), nullable=True)
     base_price = Column(Float, nullable=False)
     category_id = Column(Integer, ForeignKey("categories.id"))
     season = Column(String) # e.g., Summer 2026
@@ -52,6 +69,11 @@ class ProductVariant(Base):
     
     product = relationship("Product", back_populates="variants")
     inventories = relationship("Inventory", back_populates="variant", cascade="all, delete-orphan")
+
+    @property
+    def effective_price(self):
+        from core.pricing import effective
+        return effective(self.product, self.price_override if self.price_override is not None else self.product.base_price)
 
     @property
     def quantity(self) -> int:
