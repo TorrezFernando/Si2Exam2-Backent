@@ -28,14 +28,15 @@ def upgrade() -> None:
     op.add_column('users', sa.Column('phone', sa.String(), nullable=True))
     op.add_column('users', sa.Column('branch_id', sa.Integer(), nullable=True))
 
-    # Paso 2: Agregar FK en batch mode (tabla users apunta a branches)
-    with op.batch_alter_table('users', recreate='always') as batch_op:
+    # SQLite recreates only when required; PostgreSQL adds the FK in place.
+    # Never force recreation: sales and reservations reference users.
+    with op.batch_alter_table('users', recreate='auto') as batch_op:
         batch_op.create_foreign_key('fk_users_branch_id', 'branches', ['branch_id'], ['id'])
 
 
 def downgrade() -> None:
     """Revertir cambios."""
-    with op.batch_alter_table('users', recreate='always') as batch_op:
+    with op.batch_alter_table('users', recreate='auto') as batch_op:
         batch_op.drop_constraint('fk_users_branch_id', type_='foreignkey')
         batch_op.drop_column('branch_id')
         batch_op.drop_column('phone')

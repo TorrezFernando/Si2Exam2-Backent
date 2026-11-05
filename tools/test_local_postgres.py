@@ -32,7 +32,7 @@ def main():
         env=os.environ.copy()
         env.update(PHASE6_POSTGRES_TEST_URL=f'postgresql://postgres@127.0.0.1:{port}/fashionstore_acceptance_test',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1')
         print('Temporary loopback PostgreSQL ready; commercial database untouched.',flush=True)
-        result=subprocess.run([sys.executable,'-m','pytest','tests/test_phase6_postgres.py','tests/test_postgres_commercial.py','-q','-p','no:cacheprovider','--tb=short'],cwd=root,env=env,creationflags=flags,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=180)
+        result=subprocess.run([sys.executable,'-m','pytest','tests/test_phase6_postgres.py','tests/test_postgres_commercial.py','tests/test_postgres_migrations.py','-q','-p','no:cacheprovider','--tb=short'],cwd=root,env=env,creationflags=flags,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=180)
         print(result.stdout,flush=True)
         if result.stderr: print(result.stderr,flush=True)
         return result.returncode
