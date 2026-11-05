@@ -7,6 +7,7 @@ ENV/
 # ─── Variables de entorno (NUNCA subir al repo) ────────────
 .env
 deploy/.env.vm
+deploy/private/
 
 # ─── Base de datos local ───────────────────────────────────
 *.db

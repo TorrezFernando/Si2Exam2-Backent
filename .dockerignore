@@ -1,5 +1,6 @@
 .env
 deploy/.env.vm
+deploy/private
 .test-pg-*
 .test-tmp-*
 .backups
