@@ -1,4 +1,8 @@
 .env
+deploy/.env.vm
+.test-pg-*
+.test-tmp-*
+.backups
 venv
 .venv
 .git

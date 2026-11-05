@@ -1,0 +1,58 @@
+name: fashionstore-vm
+services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fashionstore
+      POSTGRES_USER: fashionstore
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run configure_vm.py first}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U fashionstore -d fashionstore"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  backend:
+    build:
+      context: ..
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql://fashionstore:${POSTGRES_PASSWORD}@database:5432/fashionstore
+      SECRET_KEY: ${SECRET_KEY:?Run configure_vm.py first}
+      BACKEND_CORS_ORIGINS: '["${FRONTEND_ORIGIN:?Set the frontend HTTPS origin}"]'
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-}
+      PUBLIC_WEB_URL: ${FRONTEND_ORIGIN}
+      GEMINI_API_KEY_1: ${GEMINI_API_KEY_1:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-image}
+      GEMINI_TEXT_MODEL: ${GEMINI_TEXT_MODEL:-}
+      LIBELULA_TEST_APPKEY: ${LIBELULA_TEST_APPKEY:-}
+    command: [sh, -c, "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+  https:
+    image: caddy:2-alpine
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set the backend HTTPS hostname}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.vm:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+    restart: unless-stopped
+volumes:
+  postgres_data:
+  uploads:
+  caddy_data:
+  caddy_config:

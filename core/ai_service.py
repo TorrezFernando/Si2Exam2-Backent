@@ -39,6 +39,8 @@ def _resize_if_needed(img: Image.Image, max_size: int = 512) -> Image.Image:
 def _to_png_bytes(image_bytes: bytes) -> bytes:
     """Convierte cualquier formato de imagen a PNG para Gemini y corrige la rotación EXIF."""
     img = Image.open(BytesIO(image_bytes))
+    if img.width * img.height > 16000000:
+        raise ValueError("La imagen es demasiado grande. Usa una foto de hasta 16 megapíxeles.")
     img = ImageOps.exif_transpose(img).convert("RGB")
     img = _resize_if_needed(img)
     buf = BytesIO()
@@ -50,6 +52,8 @@ async def generate_tryon(
     garment_image_bytes: bytes,
     garment_type: str = "upper_body",
     product_name: str = "la prenda",
+    selected_size: str = "",
+    selected_color: str = "",
 ) -> bytes:
     user_png = _to_png_bytes(user_photo_bytes)
     garment_png = _to_png_bytes(garment_image_bytes)
@@ -83,36 +87,35 @@ I will provide two images:
 Generate a single photorealistic image of the person wearing the garment.
 Rules: Preserve the person's face, hair, body shape exactly. Only change the clothing. Output only the image."""
 
+    prompt += f"\nSelected catalog size: {selected_size}. Selected color: {selected_color}. Use the garment reference for this variant, preserving its color and design. The size is a catalog label only: no body or garment measurements are available. Do not infer exact physical fit from the label or resize the person. This is an illustrative visualization, not a measurement or fit guarantee."
     api_keys = _get_api_keys()
     gemini_errors = []
 
     if not api_keys:
-        raise ValueError("No hay API Keys de Gemini configuradas.")
+        raise RuntimeError("El probador no tiene credenciales configuradas. Contacta al administrador.")
 
-    # Intentar generación de imagen iterando por las API keys
-    for key in api_keys:
+    for key in api_keys[:2]:
+        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=65000))
         try:
-            client = genai.Client(api_key=key)
-            response = await asyncio.to_thread(client.models.generate_content,
+            response = await asyncio.wait_for(asyncio.to_thread(client.models.generate_content,
                 model=settings.GEMINI_MODEL,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=user_png, mime_type="image/png"),
-                    types.Part.from_bytes(data=garment_png, mime_type="image/png"),
-                ],
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE", "TEXT"],
-                    temperature=0.4,
-                ),
-            )
-            for part in response.candidates[0].content.parts:
-                if part.inline_data and part.inline_data.data:
-                    return part.inline_data.data
-            gemini_errors.append(f"Key {key[-4:]}: Respondió solo texto.")
-        except Exception as e:
-            gemini_errors.append(f"Key {key[-4:]}: {str(e)[:150]}")
+                contents=[prompt, types.Part.from_bytes(data=user_png, mime_type="image/png"),
+                          types.Part.from_bytes(data=garment_png, mime_type="image/png")],
+                config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"], temperature=0.4)), timeout=70)
+            for candidate in response.candidates or []:
+                for part in (getattr(candidate.content, 'parts', None) or []):
+                    if part.inline_data and part.inline_data.data and (part.inline_data.mime_type or '').startswith('image/'):
+                        return _to_png_bytes(part.inline_data.data)
+            raise ValueError('El proveedor no generó una imagen. Prueba otra foto con buena iluminación y la persona visible.')
+        except ValueError:
+            raise
+        except Exception:
+            # Never include provider exceptions or API-key fragments in client errors.
+            continue
+        finally:
+            client.close()
+    raise RuntimeError('El proveedor de imágenes no está disponible o agotó el tiempo de espera. Inténtalo nuevamente en unos minutos.')
 
-    raise ValueError(f"Fallo en todas las API Keys de Gemini: {gemini_errors}")
 
 async def generate_recommendations(
     viewed_products: list[str],
