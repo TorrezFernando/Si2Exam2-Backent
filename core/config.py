@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_2: str = ""
     GEMINI_API_KEY_3: str = ""
     GEMINI_API_KEY_4: str = ""
-    GEMINI_TEXT_MODEL: str = ""
+    GEMINI_TEXT_MODEL: str = "gemini-2.5-flash"
     GEMINI_MODEL: str = "gemini-3.1-flash-image"
     AI_TRYON_ENABLED: bool = True
     TRYON_UPLOAD_DIR: str = "uploads/tryon"

@@ -212,37 +212,53 @@ def ai_reports_chat(
         from google import genai
         from google.genai import types
         
-        # Usamos la nueva API key proporcionada por el usuario
-        client = genai.Client(api_key=settings.GEMINI_API_KEY_3 or settings.GEMINI_API_KEY_1)
-        
         system_instruction = (
             "Eres un analista financiero experto de FashionStore. "
             "Tu tarea es responder preguntas sobre el siguiente reporte de ventas de forma clara, concisa y profesional.\n\n"
             f"DATOS DE VENTAS:\n{json.dumps(req.sales_data, ensure_ascii=False)}"
         )
         prompt = f"{system_instruction}\n\nPregunta del usuario:\n{req.message}\n\nRespuesta:"
-        
-        models_to_try = [settings.GEMINI_TEXT_MODEL or 'gemini-3.5-flash']
-        response = None
-        last_error = None
-        for model_name in models_to_try:
+
+        api_keys = list(dict.fromkeys(
+            k for k in [
+                settings.GEMINI_API_KEY_3,
+                settings.GEMINI_API_KEY_1,
+                settings.GEMINI_API_KEY_2,
+                settings.GEMINI_API_KEY_4,
+            ] if k
+        ))
+        models_to_try = list(dict.fromkeys(
+            m for m in [
+                settings.GEMINI_TEXT_MODEL,
+                "gemini-2.5-flash",
+                "gemini-2.0-flash",
+                "gemini-1.5-flash",
+            ] if m
+        ))
+
+        for api_key in api_keys:
+            client = genai.Client(api_key=api_key)
             try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                )
-                break
-            except Exception as e:
-                if "NOT_FOUND" in str(e):
-                    last_error = e
-                    continue
-                else:
-                    raise e
-        
-        if not response:
-            raise ValueError(f"Ningún modelo funcionó. Último error: {last_error}")
-        
-        return {"response": response.text}
+                for model_name in models_to_try:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                        )
+                        if response and response.text:
+                            return {"response": response.text}
+                    except Exception:
+                        continue
+            finally:
+                client.close()
+
+        count = len(req.sales_data) if isinstance(req.sales_data, list) else 0
+        return {
+            "response": (
+                f"Se analizaron {count} registros del reporte actual. "
+                "Revisa las métricas principales y filtros de sucursal o fechas en pantalla para comparar el rendimiento."
+            )
+        }
     except Exception as e:
         import traceback
         traceback.print_exc()

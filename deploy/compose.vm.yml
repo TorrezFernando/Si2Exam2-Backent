@@ -25,8 +25,11 @@ services:
       PUBLIC_API_URL: ${PUBLIC_API_URL:-}
       PUBLIC_WEB_URL: ${FRONTEND_ORIGIN}
       GEMINI_API_KEY_1: ${GEMINI_API_KEY_1:-}
+      GEMINI_API_KEY_2: ${GEMINI_API_KEY_2:-}
+      GEMINI_API_KEY_3: ${GEMINI_API_KEY_3:-}
+      GEMINI_API_KEY_4: ${GEMINI_API_KEY_4:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-image}
-      GEMINI_TEXT_MODEL: ${GEMINI_TEXT_MODEL:-}
+      GEMINI_TEXT_MODEL: ${GEMINI_TEXT_MODEL:-gemini-2.5-flash}
       LIBELULA_TEST_APPKEY: ${LIBELULA_TEST_APPKEY:-}
     command: [sh, -c, "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"]
     ports:

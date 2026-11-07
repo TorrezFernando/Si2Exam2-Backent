@@ -148,7 +148,7 @@ Return ONLY a valid JSON array of integer IDs. Example: [1, 5, 12, 3]"""
         try:
             client = genai.Client(api_key=key)
             response = await asyncio.to_thread(client.models.generate_content,
-                model=settings.GEMINI_TEXT_MODEL,
+                model=settings.GEMINI_TEXT_MODEL or "gemini-2.5-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
