@@ -27,7 +27,8 @@ def main():
         'PUBLIC_API_URL='+args.api_origin,
         'API_DOMAIN='+urlsplit(args.api_origin).hostname,
         'GEMINI_MODEL=gemini-3.1-flash-image',
-        'GEMINI_API_KEY_1=', 'GEMINI_TEXT_MODEL=', 'LIBELULA_TEST_APPKEY=', '',
+        'GEMINI_API_KEY_1=', 'GEMINI_TEXT_MODEL=', 'LIBELULA_TEST_APPKEY=',
+        'PAYPAL_CLIENT_ID=', 'PAYPAL_CLIENT_SECRET=', 'PAYPAL_ENV=sandbox', 'PAYPAL_BOB_PER_USD=6.96', '',
     ])
     # Exclusive creation preserves credentials if setup is accidentally repeated.
     fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)

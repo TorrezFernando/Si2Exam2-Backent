@@ -85,9 +85,11 @@ def create_order(*, db: Session = Depends(get_db), order_in: OrderCreate,
             customer_id = reservation.user_id
         elif order_in.reservation_id:
             raise HTTPException(400, 'Tipo de venta incompatible con reserva')
+        online_provider = None
         if not onsite:
-            from core.libelula import ensure_configured
-            ensure_configured()
+            from core.payment_gateway import active_provider, gateway
+            online_provider = active_provider()
+            gateway(online_provider).ensure_configured()
             if order_in.payment_method.value not in ('tarjeta', 'qr', 'transferencia'):
                 raise HTTPException(400, 'Selecciona un pago digital o realiza una reserva')
         if branch_id is None:
@@ -114,7 +116,7 @@ def create_order(*, db: Session = Depends(get_db), order_in: OrderCreate,
             reservation_id=reservation.id if reservation else None, request_key=request_key,
             payment_method=order_in.payment_method,
             payment_status=PaymentStatusEnum.paid if onsite else PaymentStatusEnum.pending,
-            is_paid=onsite, payment_provider='Caja_Local' if onsite else 'Libelula',
+            is_paid=onsite, payment_provider='Caja_Local' if onsite else online_provider,
             transaction_ref=f'FS-{uuid4().hex}',
             total_amount=float(sum((qty * price for _, qty, price in priced), money(0))))
         db.add(order)
@@ -187,7 +189,7 @@ def return_order(order_id: int, db: Session = Depends(get_db), current_user=Depe
             raise HTTPException(404, 'Orden no encontrada')
         check_branch(db, current_user, order.branch_id)
         if order.payment_provider != 'Caja_Local':
-            raise HTTPException(409, 'Los pagos digitales requieren tramitar el reembolso con Libelula')
+            raise HTTPException(409, f'Los pagos digitales requieren tramitar el reembolso con {order.payment_provider or "la pasarela"}')
         if order.payment_status == PaymentStatusEnum.refunded:
             return order
         if not order.is_paid:

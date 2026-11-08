@@ -31,6 +31,10 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-image}
       GEMINI_TEXT_MODEL: ${GEMINI_TEXT_MODEL:-gemini-2.5-flash}
       LIBELULA_TEST_APPKEY: ${LIBELULA_TEST_APPKEY:-}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_ENV: ${PAYPAL_ENV:-sandbox}
+      PAYPAL_BOB_PER_USD: ${PAYPAL_BOB_PER_USD:-6.96}
     command: [sh, -c, "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "127.0.0.1:8000:8000"

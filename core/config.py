@@ -42,6 +42,11 @@ class Settings(BaseSettings):
 
     # Set only a Libelula-issued TEST appkey for the academic deployment.
     LIBELULA_TEST_APPKEY: str = ""
+    # PayPal REST app credentials (developer.paypal.com). When set, new online orders use PayPal.
+    PAYPAL_CLIENT_ID: str = ""
+    PAYPAL_CLIENT_SECRET: str = ""
+    PAYPAL_ENV: str = "sandbox"  # sandbox | live
+    PAYPAL_BOB_PER_USD: float = 6.96  # PayPal does not settle BOB; totals are charged in USD
     PUBLIC_API_URL: str = ""
     PUBLIC_WEB_URL: str = ""
 
