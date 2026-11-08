@@ -13,6 +13,9 @@ def authorize(db, user, request, branch_id=None):
         except ValueError: raise HTTPException(403,'Selecciona una empresa explícitamente.')
     tenant=db.get(Tenant,tenant_id) if tenant_id else None
     if not tenant or not tenant.is_active: raise HTTPException(403,'Empresa no disponible.')
+    from core.subscription_plans import process_expired_subscriptions
+    process_expired_subscriptions(db, tenant_id=tenant.id)
+    db.refresh(tenant)
     sub=tenant.active_subscription
     now=datetime.now(timezone.utc)
     def aware(d):return d.replace(tzinfo=d.tzinfo or timezone.utc)

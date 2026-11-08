@@ -19,6 +19,9 @@ def context(db, user, branch_id):
     branch = db.get(Branch, branch_id)
     if not branch or not branch.is_active or branch.tenant_id != tenant.id:
         raise HTTPException(403, 'La sucursal no pertenece a su empresa.')
+    from core.subscription_plans import process_expired_subscriptions
+    process_expired_subscriptions(db, tenant_id=tenant.id)
+    db.refresh(tenant)
     sub = tenant.active_subscription
     now = datetime.now(timezone.utc)
     end = sub.end_date if sub else None

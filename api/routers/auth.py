@@ -49,10 +49,15 @@ def login_access_token(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="La empresa o tenant asociado a esta cuenta se encuentra inactivo.",
             )
+        from core.subscription_plans import process_expired_subscriptions
+        process_expired_subscriptions(db, tenant_id=user.tenant.id)
+        db.refresh(user.tenant)
         active_sub = user.tenant.active_subscription
         if active_sub and active_sub.plan:
             plan_code = active_sub.plan.code
             plan_id = active_sub.plan.id
+        else:
+            plan_code = "cancelled"
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.create_access_token(

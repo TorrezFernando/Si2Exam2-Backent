@@ -18,9 +18,8 @@ def can_manage(db, user):
     return bool(get_user_permissions(db, user) & {'reservations:read', 'reservations:write', 'sales:write'})
 
 def accessible(db, user, reservation_id, manage=False):
-    query = db.query(Reservation).filter(Reservation.id == reservation_id)
-    if user.tenant_id is not None:
-        query = query.filter(Reservation.tenant_id == user.tenant_id)
+    tenant_id = company_id(user)
+    query = db.query(Reservation).filter(Reservation.id == reservation_id, Reservation.tenant_id == tenant_id)
     reservation = query.with_for_update().first()
     if not reservation:
         raise HTTPException(404, 'Reserva no encontrada')
@@ -34,9 +33,8 @@ def accessible(db, user, reservation_id, manage=False):
 def list_reservations(db: Session = Depends(get_db), skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100), branch_id: Optional[int] = None,
     status: Optional[ReservationStatus] = None, current_user=Depends(get_current_active_user)):
-    query = db.query(Reservation)
-    if current_user.tenant_id is not None:
-        query = query.filter(Reservation.tenant_id == current_user.tenant_id)
+    tenant_id = company_id(current_user)
+    query = db.query(Reservation).filter(Reservation.tenant_id == tenant_id)
     if can_manage(db, current_user):
         if 'branches:write' not in get_user_permissions(db, current_user):
             if not current_user.branch_id:

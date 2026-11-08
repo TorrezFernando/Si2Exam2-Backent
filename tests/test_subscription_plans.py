@@ -1,10 +1,12 @@
+from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 from test_security_regressions import shop, client
-from core.subscription_plans import ensure_plans
-from db.models import Permission, Branch, Subscription
+from core.subscription_plans import ensure_plans, process_expired_subscriptions
+from db.models import Permission, Branch, Subscription, User, Role
 from api.deps import verify_branch_limit, require_feature
+from api.routers import branches, reservations
 
 
 def prepare(shop):
@@ -61,3 +63,85 @@ def test_customer_cannot_select_enterprise(shop):
     prepare(shop)
     response = client(shop, shop.customer).post('/saas/my-subscription/change-plan', json={'plan_code': 'enterprise'})
     assert response.status_code == 403
+
+
+def test_monthly_subscription_auto_cancels_at_period_end_and_renews(shop):
+    prepare(shop)
+    api = client(shop, shop.user)
+
+    # Upgrade to professional: sets 30-day end_date and cancel_at_period_end=True by default
+    res = api.post('/saas/my-subscription/change-plan', json={'plan_code': 'professional'})
+    assert res.status_code == 200, res.text
+    sub = shop.db.query(Subscription).filter_by(tenant_id=shop.tenant.id, status='active').one()
+    assert sub.cancel_at_period_end is True
+    assert sub.end_date is not None
+
+    # Check my-subscription payload includes end_date, cancel_at_period_end, days_remaining
+    my_sub = api.get('/saas/my-subscription').json()
+    assert my_sub['cancel_at_period_end'] is True
+    assert my_sub['end_date'] is not None
+    assert my_sub['days_remaining'] >= 29
+
+    # Toggle auto-cancel off and back on
+    toggle_off = api.patch('/saas/my-subscription/auto-cancel', json={'cancel_at_period_end': False})
+    assert toggle_off.status_code == 200
+    assert toggle_off.json()['cancel_at_period_end'] is False
+    toggle_on = api.patch('/saas/my-subscription/auto-cancel', json={'cancel_at_period_end': True})
+    assert toggle_on.status_code == 200
+    assert toggle_on.json()['cancel_at_period_end'] is True
+
+    # Simulate end of monthly cycle (end_date in the past)
+    sub.end_date = datetime.now(timezone.utc) - timedelta(minutes=5)
+    shop.db.commit()
+
+    cancelled_count = process_expired_subscriptions(shop.db, tenant_id=shop.tenant.id)
+    assert cancelled_count == 1
+    shop.db.refresh(sub)
+    assert sub.status == 'cancelled'
+    assert sub.cancelled_at is not None
+
+    # Feature & branch limits must reject when subscription was auto-cancelled
+    request = Request({'type': 'http', 'headers': []})
+    with pytest.raises(HTTPException) as feat_err:
+        require_feature('ai_reports')(request, shop.user, shop.db)
+    assert feat_err.value.status_code == 403
+
+    with pytest.raises(HTTPException) as branch_err:
+        verify_branch_limit(request, shop.user, shop.db)
+    assert branch_err.value.status_code == 403
+
+    # Renew for another 30-day cycle
+    renewed = api.post('/saas/my-subscription/renew')
+    assert renewed.status_code == 200, renewed.text
+    assert renewed.json()['subscription_status'] == 'active'
+    assert renewed.json()['days_remaining'] >= 29
+    assert require_feature('ai_reports')(request, shop.user, shop.db) == shop.user
+
+
+def test_superadmin_is_strictly_separated_from_company_modules(shop):
+    prepare(shop)
+    sa_role = Role(name='superadmin', description='SaaS Platform Admin', is_predefined=True)
+    sa_user = User(email='superadmin@platform.test', hashed_password='x', role=sa_role, tenant_id=None, is_active=True)
+    shop.db.add_all([sa_role, sa_user])
+    shop.db.commit()
+
+    api = client(shop, sa_user)
+    api.app.include_router(branches.router, prefix='/branches')
+    api.app.include_router(reservations.router, prefix='/reservations')
+
+    # SaaS & global endpoints succeed for SuperAdmin
+    assert api.get('/saas/tenants').status_code == 200
+    assert api.get('/roles/').status_code == 200
+    my_sub = api.get('/saas/my-subscription')
+    assert my_sub.status_code == 200
+    assert my_sub.json()['status'] == 'global'
+    assert my_sub.json()['tenant'] is None
+
+    # Company-internal operational modules MUST reject SuperAdmin with 403
+    assert api.post('/products/', json={'name': 'Test', 'base_price': 10, 'variants': []}).status_code == 403
+    assert api.post('/branches/', json={'name': 'Sucursal X', 'address': 'Av 1'}).status_code == 403
+    assert api.get('/users/').status_code == 403
+    assert api.get('/orders/').status_code == 403
+    assert api.get('/operations/masters/categories').status_code == 403
+    assert api.get('/reservations/').status_code == 403
+

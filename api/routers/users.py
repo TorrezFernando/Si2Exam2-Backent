@@ -12,7 +12,7 @@ from core import security
 from db.models.user import User
 from db.models.rbac import Role, UserPermission
 from db.models.branch import Branch
-from core.access import check_assign_role, check_user_target, is_global_admin
+from core.access import check_assign_role, check_user_target, company_id, is_global_admin
 from api.deps import get_user_permissions
 from db.models.rbac import Permission
 from schemas.user import (
@@ -38,9 +38,8 @@ def list_users(
     branch_id: Optional[int] = None,
     is_active: Optional[bool] = None,
 ) -> Any:
-    query = db.query(User).options(joinedload(User.role), joinedload(User.user_permissions))
-    if current_user.tenant_id is not None:
-        query = query.filter(User.tenant_id == current_user.tenant_id)
+    tenant_id = company_id(current_user)
+    query = db.query(User).options(joinedload(User.role), joinedload(User.user_permissions)).filter(User.tenant_id == tenant_id)
 
     if role_id is not None:
         query = query.filter(User.role_id == role_id)
@@ -61,6 +60,7 @@ def create_user_by_admin(
     current_user: User = Depends(require_permission("users:write")),
     user_in: UserCreateByAdmin,
 ) -> Any:
+    tenant_id = company_id(current_user)
     existing = db.query(User).filter(User.email == user_in.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Ya existe un usuario con este correo.")
@@ -69,7 +69,7 @@ def create_user_by_admin(
     if not role:
         raise HTTPException(status_code=404, detail="Rol no encontrado.")
     check_assign_role(db, current_user, role)
-    if role.name == 'superadmin' and current_user.tenant_id is not None:
+    if role.name == 'superadmin':
         raise HTTPException(403, 'Los roles globales no pueden asignarse a una empresa.')
 
     # Logica simple para obligar branch a encargados/cajeros
@@ -78,7 +78,7 @@ def create_user_by_admin(
 
     if user_in.branch_id:
         branch = db.query(Branch).filter(Branch.id == user_in.branch_id).first()
-        if not branch or (current_user.tenant_id and branch.tenant_id != current_user.tenant_id):
+        if not branch or branch.tenant_id != tenant_id:
             raise HTTPException(status_code=400, detail="Sucursal no válida o no pertenece a tu empresa.")
 
     new_user = User(
@@ -86,7 +86,7 @@ def create_user_by_admin(
         hashed_password=security.get_password_hash(user_in.password),
         full_name=user_in.full_name,
         phone=user_in.phone,
-        tenant_id=current_user.tenant_id,
+        tenant_id=tenant_id,
         role_id=user_in.role_id,
         branch_id=user_in.branch_id,
     )
@@ -108,10 +108,13 @@ def get_user(
     current_user: User = Depends(require_permission("users:read")),
     user_id: int,
 ) -> Any:
-    query = db.query(User).options(joinedload(User.role), joinedload(User.user_permissions)).filter(User.id == user_id)
-    if current_user.tenant_id is not None:
-        query = query.filter(User.tenant_id == current_user.tenant_id)
-    user = query.first()
+    tenant_id = company_id(current_user)
+    user = (
+        db.query(User)
+        .options(joinedload(User.role), joinedload(User.user_permissions))
+        .filter(User.id == user_id, User.tenant_id == tenant_id)
+        .first()
+    )
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
     return user
@@ -127,10 +130,8 @@ def update_user(
     user_id: int,
     user_in: UserUpdate,
 ) -> Any:
-    query = db.query(User).filter(User.id == user_id)
-    if current_user.tenant_id is not None:
-        query = query.filter(User.tenant_id == current_user.tenant_id)
-    user = query.first()
+    tenant_id = company_id(current_user)
+    user = db.query(User).filter(User.id == user_id, User.tenant_id == tenant_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
 
@@ -139,14 +140,14 @@ def update_user(
     if user_in.role_id is not None:
         assigned_role = db.get(Role, user_in.role_id)
         check_assign_role(db, current_user, assigned_role)
-        if assigned_role.name == 'superadmin' and user.tenant_id is not None:
+        if assigned_role.name == 'superadmin':
             raise HTTPException(403, 'Los roles globales no pueden asignarse a una empresa.')
     if user_in.branch_id is not None:
         assigned_branch = db.get(Branch, user_in.branch_id)
         if not assigned_branch or assigned_branch.tenant_id != user.tenant_id:
             raise HTTPException(400, 'Sucursal ajena a la empresa del usuario.')
     if user.role and user.role.name == "admin" and user_in.role_id is not None and user_in.role_id != user.role_id:
-        admin_count = db.query(User).join(Role).filter(Role.name == "admin", User.is_active == True).count()
+        admin_count = db.query(User).join(Role).filter(Role.name == "admin", User.is_active == True, User.tenant_id == tenant_id).count()
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="No puedes quitarle el rol al último administrador.")
 
@@ -160,7 +161,7 @@ def update_user(
     db.commit()
     db.refresh(user)
 
-    log_audit(db, current_user.id, "UPDATE", "USER", str(user.id), {"old": old_values, "new": update_data}, tenant_id=current_user.tenant_id)
+    log_audit(db, current_user.id, "UPDATE", "USER", str(user.id), {"old": old_values, "new": update_data}, tenant_id=tenant_id)
 
     # Recargar con relaciones
     return db.query(User).options(joinedload(User.role)).filter(User.id == user_id).first()
@@ -178,7 +179,8 @@ def update_user_permissions(
     permission_id: int,
     is_granted: bool
 ) -> Any:
-    user = db.query(User).filter(User.id == user_id).first()
+    tenant_id = company_id(current_user)
+    user = db.query(User).filter(User.id == user_id, User.tenant_id == tenant_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
     check_user_target(current_user, user)
@@ -205,7 +207,7 @@ def update_user_permissions(
 
     db.commit()
     
-    log_audit(db, current_user.id, "UPDATE", "USER_PERMISSION", str(user_id), {"permission_id": permission_id, "is_granted": is_granted})
+    log_audit(db, current_user.id, "UPDATE", "USER_PERMISSION", str(user_id), {"permission_id": permission_id, "is_granted": is_granted}, tenant_id=tenant_id)
     
     return {"message": "Permiso actualizado correctamente"}
 
@@ -219,7 +221,8 @@ def deactivate_user(
     current_user: User = Depends(require_permission("users:write")),
     user_id: int,
 ) -> Any:
-    user = db.query(User).filter(User.id == user_id).first()
+    tenant_id = company_id(current_user)
+    user = db.query(User).filter(User.id == user_id, User.tenant_id == tenant_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
     check_user_target(current_user, user)
@@ -228,14 +231,14 @@ def deactivate_user(
         raise HTTPException(status_code=400, detail="No puedes desactivarte a ti mismo.")
 
     if user.role and user.role.name == "admin":
-        admin_count = db.query(User).join(Role).filter(Role.name == "admin", User.is_active == True).count()
+        admin_count = db.query(User).join(Role).filter(Role.name == "admin", User.is_active == True, User.tenant_id == tenant_id).count()
         if admin_count <= 1:
             raise HTTPException(status_code=400, detail="No se puede desactivar al último administrador.")
 
     user.is_active = False
     db.commit()
     
-    log_audit(db, current_user.id, "DELETE", "USER", str(user.id), {"is_active": False})
+    log_audit(db, current_user.id, "DELETE", "USER", str(user.id), {"is_active": False}, tenant_id=tenant_id)
     
     return user
 

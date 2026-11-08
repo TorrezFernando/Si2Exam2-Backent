@@ -217,9 +217,11 @@ def verify_branch_limit(
     if current_user.role and current_user.role.name == "superadmin" and not request.headers.get("x-tenant-id"):
         return
 
+    from core.subscription_plans import process_expired_subscriptions
     tenant = get_current_tenant(request, current_user, db)
+    process_expired_subscriptions(db, tenant_id=tenant.id)
     # Serialize branch creation/reactivation per company until the caller commits.
-    db.query(Tenant).filter(Tenant.id == tenant.id).with_for_update().first()
+    tenant = db.query(Tenant).filter(Tenant.id == tenant.id).with_for_update().first()
     sub = tenant.active_subscription
     if not sub or not sub.plan:
         raise HTTPException(
@@ -256,7 +258,10 @@ def require_feature(feature_name: str):
         if current_user.role and current_user.role.name == "superadmin":
             return current_user
 
+        from core.subscription_plans import process_expired_subscriptions
         tenant = get_current_tenant(request, current_user, db)
+        process_expired_subscriptions(db, tenant_id=tenant.id)
+        db.refresh(tenant)
         sub = tenant.active_subscription
         if not sub or not sub.plan:
             raise HTTPException(

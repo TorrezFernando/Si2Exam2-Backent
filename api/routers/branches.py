@@ -9,6 +9,7 @@ from api.deps import (
     get_current_active_user,
     verify_branch_limit,
 )
+from core.access import company_id
 from db.models.branch import Branch
 from schemas.branch import Branch as BranchSchema, BranchCreate, BranchUpdate
 
@@ -51,11 +52,12 @@ def create_branch(
     _limit_check = Depends(verify_branch_limit),
 ) -> Any:
     """
-    Crea una nueva sucursal (Solo Admin).
+    Crea una nueva sucursal (Solo Admin de Empresa).
     Verifica que no exceda el límite del plan de suscripción del Tenant.
     """
+    tenant_id = company_id(current_user)
     branch = Branch(
-        tenant_id=current_user.tenant_id,
+        tenant_id=tenant_id,
         name=branch_in.name,
         city=branch_in.city,
         address=branch_in.address,
@@ -76,11 +78,9 @@ def update_branch(
     branch_in: BranchUpdate,
     current_user = Depends(require_permission("branches:write")),
 ) -> Any:
-    """Actualiza una sucursal (Solo Admin con acceso a su tenant)."""
-    query = db.query(Branch).filter(Branch.id == branch_id)
-    if current_user.tenant_id is not None:
-        query = query.filter(Branch.tenant_id == current_user.tenant_id)
-    branch = query.first()
+    """Actualiza una sucursal (Solo Admin de Empresa con acceso a su tenant)."""
+    tenant_id = company_id(current_user)
+    branch = db.query(Branch).filter(Branch.id == branch_id, Branch.tenant_id == tenant_id).first()
     if not branch:
         raise HTTPException(status_code=404, detail="Sucursal no encontrada")
     if branch_in.is_active is True and not branch.is_active:
@@ -103,11 +103,9 @@ def delete_branch(
     branch_id: int,
     current_user = Depends(require_permission("branches:write")),
 ) -> Any:
-    """Desactiva una sucursal (soft delete) (Solo Admin)."""
-    query = db.query(Branch).filter(Branch.id == branch_id)
-    if current_user.tenant_id is not None:
-        query = query.filter(Branch.tenant_id == current_user.tenant_id)
-    branch = query.first()
+    """Desactiva una sucursal (soft delete) (Solo Admin de Empresa)."""
+    tenant_id = company_id(current_user)
+    branch = db.query(Branch).filter(Branch.id == branch_id, Branch.tenant_id == tenant_id).first()
     if not branch:
         raise HTTPException(status_code=404, detail="Sucursal no encontrada")
         

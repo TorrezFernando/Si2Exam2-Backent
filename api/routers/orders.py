@@ -21,9 +21,8 @@ import json
 router = APIRouter()
 
 def orders_query(db, user):
-    query = db.query(Order)
-    if user.tenant_id is not None:
-        query = query.filter(Order.tenant_id == user.tenant_id)
+    tenant_id = company_id(user)
+    query = db.query(Order).filter(Order.tenant_id == tenant_id)
     perms = get_user_permissions(db, user)
     if not perms & {'sales:read', 'sales:write'}:
         return query.filter(Order.user_id == user.id)
@@ -294,9 +293,8 @@ def list_all_exchanges(
     current_user = Depends(require_permission('sales:read'))
 ):
     """Lista todos los cambios de prendas de la empresa."""
-    query = db.query(GarmentExchange)
-    if current_user.tenant_id is not None:
-        query = query.filter(GarmentExchange.tenant_id == current_user.tenant_id)
+    tenant_id = company_id(current_user)
+    query = db.query(GarmentExchange).filter(GarmentExchange.tenant_id == tenant_id)
     if 'branches:write' not in get_user_permissions(db, current_user):
         check_branch(db, current_user, current_user.branch_id)
         query = query.filter(GarmentExchange.branch_id == current_user.branch_id)

@@ -7,29 +7,50 @@ Ejecutar en desarrollo:
 Documentación interactiva (Swagger):
     http://localhost:8000/api/v1/openapi.json  →  http://localhost:8000/docs
 """
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from core.config import settings
-from db.database import engine, Base
+from db.database import engine, Base, SessionLocal
 # Importar todos los modelos para que Alembic y Base los reconozcan
 from db.models import *  # noqa: F401,F403
+
+
+async def _subscription_auto_cancel_worker():
+    """Tarea periódica en segundo plano que cancela suscripciones cuyo mes ha finalizado."""
+    from core.subscription_plans import process_expired_subscriptions
+    while True:
+        try:
+            with SessionLocal() as db:
+                cancelled_count = process_expired_subscriptions(db)
+                if cancelled_count:
+                    print(f"[SAAS] {cancelled_count} suscripción(es) cancelada(s)/vencida(s) automáticamente por fin de mes.")
+        except Exception:
+            pass
+        await asyncio.sleep(60)
 
 
 # ─── Lifespan: Inicialización y cierre de la app ─────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Evento de inicio: verifica conexión a la BD.
+    Evento de inicio: verifica conexión a la BD e inicia monitor de corte mensual de suscripciones.
     En producción las migraciones se aplican con Alembic (no create_all).
     """
     from core.config import validate_production
     validate_production()
     print(f"[START] Iniciando {settings.PROJECT_NAME} v{settings.VERSION}")
     print("[DB]    Configuracion de base de datos cargada.")
-    yield
-    print("[STOP] Cerrando la aplicacion.")
+    bg_task = asyncio.create_task(_subscription_auto_cancel_worker())
+    try:
+        yield
+    finally:
+        bg_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await bg_task
+        print("[STOP] Cerrando la aplicacion.")
 
 
 # ─── Instancia FastAPI ────────────────────────────────────────────────────────

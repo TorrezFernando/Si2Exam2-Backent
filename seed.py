@@ -122,8 +122,24 @@ def seed():
         db.refresh(tenant_a)
         db.refresh(tenant_b)
 
-        sub_a = Subscription(tenant_id=tenant_a.id, plan_id=plan_pro.id, status="active")
-        sub_b = Subscription(tenant_id=tenant_b.id, plan_id=plan_basic.id, status="active")
+        from datetime import timezone
+        now_utc = datetime.now(timezone.utc)
+        sub_a = Subscription(
+            tenant_id=tenant_a.id,
+            plan_id=plan_pro.id,
+            start_date=now_utc,
+            end_date=now_utc + timedelta(days=30),
+            cancel_at_period_end=True,
+            status="active",
+        )
+        sub_b = Subscription(
+            tenant_id=tenant_b.id,
+            plan_id=plan_basic.id,
+            start_date=now_utc,
+            end_date=now_utc + timedelta(days=30),
+            cancel_at_period_end=True,
+            status="active",
+        )
         db.add_all([sub_a, sub_b])
         db.commit()
         print(f"   [+] Tenant A (ID {tenant_a.id}): {tenant_a.name} -> Plan: {plan_pro.name}")

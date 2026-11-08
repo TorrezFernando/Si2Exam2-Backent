@@ -51,6 +51,9 @@ class TenantSchema(TenantBase):
 class TenantDetailSchema(TenantSchema):
     active_plan: Optional[SubscriptionPlanSchema] = None
     subscription_status: str = "active"
+    subscription_end_date: Optional[datetime] = None
+    cancel_at_period_end: bool = True
+    days_remaining: Optional[int] = None
     branches_count: int = 0
     users_count: int = 0
     orders_count: int = 0
@@ -58,6 +61,10 @@ class TenantDetailSchema(TenantSchema):
 
 class ChangePlanRequest(BaseModel):
     plan_code: str = Field(..., description="Código del nuevo plan ('basic', 'professional', 'enterprise')")
+
+
+class AutoCancelUpdateRequest(BaseModel):
+    cancel_at_period_end: bool = Field(..., description="Si es True, la suscripción se cancela automáticamente al acabar el mes")
 
 
 class SubscriptionUsage(BaseModel):
@@ -74,6 +81,10 @@ class MySubscriptionResponse(BaseModel):
     plan: Optional[SubscriptionPlanSchema] = None
     status: str = "active"
     start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    cancel_at_period_end: bool = True
+    cancelled_at: Optional[datetime] = None
+    days_remaining: Optional[int] = None
     usage: Optional[SubscriptionUsage] = None
 
 

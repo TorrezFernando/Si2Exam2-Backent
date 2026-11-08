@@ -1,7 +1,12 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float, true
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
+
+
+def _default_period_end():
+    return datetime.now(timezone.utc) + timedelta(days=30)
 
 
 class Tenant(Base):
@@ -33,6 +38,13 @@ class Tenant(Base):
             if sub.status == "active":
                 return sub
         return None
+
+    @property
+    def latest_subscription(self):
+        """Retorna la suscripción más reciente (activa, cancelada o vencida)."""
+        if not self.subscriptions:
+            return None
+        return max(self.subscriptions, key=lambda s: s.id or 0)
 
 
 class SubscriptionPlan(Base):
@@ -66,7 +78,9 @@ class Subscription(Base):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
     plan_id = Column(Integer, ForeignKey("subscription_plans.id"), nullable=False, index=True)
     start_date = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    end_date = Column(DateTime(timezone=True), nullable=True)
+    end_date = Column(DateTime(timezone=True), default=_default_period_end, nullable=True)
+    cancel_at_period_end = Column(Boolean, default=True, server_default=true(), nullable=False)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String, default="active", nullable=False)  # 'active', 'expired', 'cancelled'
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
