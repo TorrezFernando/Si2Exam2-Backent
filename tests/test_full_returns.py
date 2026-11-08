@@ -89,3 +89,55 @@ def test_refund_report_and_inventory_after_exchange_return(shop,monkeypatch):
     report=snapshot(shop.db,shop.cashier)
     assert report['totals']['sold_net']==0
     assert report['totals']['available']==6
+
+
+def test_month_end_return_when_desired_item_not_available(shop,monkeypatch):
+    from api.routers.full_returns import list_month_end_returns, settle_single_month_end_return
+    from core.exchange_reporting import month_end_return_summary
+    from db.models import Permission
+
+    order=prepare(shop,monkeypatch)
+    shop.cashier.role.permissions.append(Permission(name='sales:read'))
+    shop.db.commit()
+
+    # Cotizar devolución programada a Fin de Mes (incluso para venta con tarjeta/QR cuando no existe el ítem deseado)
+    q=preview(order.id,shop.db,shop.cashier,refund_timing='MONTH_END')
+    assert q['refund_amount']==240
+    assert q['refund_timing']=='MONTH_END'
+    assert q['scheduled_for'] is not None
+
+    # Registrar devolución a Fin de Mes por prenda defectuosa cuyo reemplazo no existe en stock
+    ret=create(
+        order.id,
+        ReturnInput(
+            request_key='month-end-return-0001',
+            confirmed_refund_amount=240,
+            settlement_confirmed=True,
+            refund_timing='MONTH_END',
+            return_reason='Prenda defectuosa y no existe stock del ítem deseado',
+            is_defective=True,
+            desired_variant_id=shop.b.id,
+        ),
+        shop.db,
+        shop.cashier,
+    )
+    assert ret['refund_timing']=='MONTH_END'
+    assert ret['disbursement_status']=='PENDING_MONTH_END'
+    assert ret['scheduled_for'] is not None
+    assert ret['is_defective'] is True
+    # Como es defectuosa, no infla el stock vendible de shop.a (se mantiene en 3)
+    assert stock(shop)==3
+
+    summary=month_end_return_summary(shop.db,shop.cashier)
+    assert summary['pending_count']==1 and summary['pending_amount']==240
+
+    pending_list=list_month_end_returns(shop.db,shop.cashier)
+    assert len(pending_list)==1 and pending_list[0]['disbursement_status']=='PENDING_MONTH_END'
+
+    # Al llegar Fin de Mes (ajuste mensual), se liquida la devolución
+    settled=settle_single_month_end_return(order.id,shop.db,shop.cashier)
+    assert settled['disbursement_status']=='COMPLETED'
+    assert settled['settled_at'] is not None
+    summary_after=month_end_return_summary(shop.db,shop.cashier)
+    assert summary_after['pending_count']==0 and summary_after['settled_count']==1
+

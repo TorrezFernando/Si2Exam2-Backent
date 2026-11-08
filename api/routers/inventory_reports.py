@@ -50,7 +50,8 @@ def snapshot(db, user, branch_id=None):
         GarmentExchange.tenant_id==tenant,GarmentExchange.branch_id.in_(ids),GarmentExchange.status=='APPROVED',
         Order.tenant_id==tenant,Order.is_paid.is_(True),Order.payment_status==PaymentStatusEnum.paid):
         counts[ex.branch_id,ex.original_variant_id]['sold_net'] -= ex.quantity
-        counts[ex.branch_id,ex.new_variant_id]['sold_net'] += ex.quantity
+        if ex.exchange_type!='month_end_refund':
+            counts[ex.branch_id,ex.new_variant_id]['sold_net'] += ex.quantity
     for b,v,n in db.query(IncomingStock.branch_id,IncomingStock.variant_id,func.sum(IncomingStock.quantity-IncomingStock.received_quantity)).filter(
         IncomingStock.tenant_id==tenant,IncomingStock.branch_id.in_(ids),IncomingStock.status.in_(['pending','partial'])
         ).group_by(IncomingStock.branch_id,IncomingStock.variant_id):

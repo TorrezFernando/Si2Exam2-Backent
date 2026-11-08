@@ -243,15 +243,42 @@ def exchange_garment(order_id: int, exchange_in: GarmentExchangeCreate,
             Inventory.branch_id == exchange_in.branch_id,
             Inventory.variant_id.in_([exchange_in.original_variant_id, exchange_in.new_variant_id])
         ).order_by(Inventory.variant_id).with_for_update().all()
-        move_stock(db, exchange_in.branch_id, exchange_in.original_variant_id, exchange_in.quantity,
-                   'CAMBIO_DEVOLUCION', current_user.id, f'exchange:{exchange_in.request_key}', tenant_id)
-        move_stock(db, exchange_in.branch_id, exchange_in.new_variant_id, -exchange_in.quantity,
-                   'CAMBIO_ENTREGA', current_user.id, f'exchange:{exchange_in.request_key}', tenant_id)
-        exchange = GarmentExchange(tenant_id=tenant_id, order_id=order.id, branch_id=exchange_in.branch_id,
+        resolved_type = result.get('exchange_type', 'variant_or_product')
+        is_month_end = resolved_type == 'month_end_refund'
+        is_defective_return = (
+            exchange_in.original_variant_id == exchange_in.new_variant_id
+            or resolved_type == 'same_defective'
+        )
+        if is_defective_return:
+            # La prenda devuelta está defectuosa: se registra como merma/defectuosa sin sumarla al stock vendible.
+            db.add(InventoryMovement(
+                tenant_id=tenant_id,
+                branch_id=exchange_in.branch_id,
+                variant_id=exchange_in.original_variant_id,
+                quantity=0,
+                kind='CAMBIO_DEFECTUOSO',
+                user_id=current_user.id,
+                reference=f'exchange:{exchange_in.request_key};defective:{exchange_in.quantity}',
+            ))
+        else:
+            move_stock(db, exchange_in.branch_id, exchange_in.original_variant_id, exchange_in.quantity,
+                       'CAMBIO_DEVOLUCION', current_user.id, f'exchange:{exchange_in.request_key}', tenant_id)
+        if not is_month_end:
+            # En la devolución a fin de mes no se entrega ninguna prenda: el ítem deseado no existe.
+            move_stock(db, exchange_in.branch_id, exchange_in.new_variant_id, -exchange_in.quantity,
+                       'CAMBIO_ENTREGA', current_user.id, f'exchange:{exchange_in.request_key}', tenant_id)
+        exchange = GarmentExchange(
+            tenant_id=tenant_id, order_id=order.id, branch_id=exchange_in.branch_id,
             user_id=current_user.id, original_variant_id=exchange_in.original_variant_id,
             new_variant_id=exchange_in.new_variant_id, quantity=exchange_in.quantity, reason=exchange_in.reason,
-            difference_amount=result['difference_amount'], status='APPROVED', request_key=exchange_in.request_key,
-            request_fingerprint=fingerprint, settlement_method=result['settlement_method'])
+            exchange_type=resolved_type,
+            difference_amount=result['difference_amount'],
+            additional_payment_method=exchange_in.additional_payment_method if result['difference_amount'] > 0 else None,
+            status='APPROVED', request_key=exchange_in.request_key,
+            request_fingerprint=fingerprint, settlement_method=result['settlement_method'],
+            disbursement_status='PENDING_MONTH_END' if is_month_end else None,
+            scheduled_for=datetime.fromisoformat(result['scheduled_for']) if is_month_end else None,
+        )
         db.add(exchange); db.commit(); db.refresh(exchange)
         return exchange
     except IntegrityError:

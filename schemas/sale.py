@@ -80,16 +80,18 @@ class Order(OrderBase):
 
 class GarmentExchangeQuoteRequest(BaseModel):
     original_variant_id: int = Field(..., gt=0, description="ID de la variante que se devuelve")
-    new_variant_id: int = Field(..., gt=0, description="ID de la nueva variante deseada (talla/color)")
+    new_variant_id: int = Field(..., gt=0, description="ID de la nueva variante deseada (mismo producto por defecto, o diferente talla/color/producto)")
     quantity: int = Field(1, ge=1, description="Cantidad de prendas a cambiar")
     branch_id: int = Field(..., gt=0, description="Sucursal donde se realiza el cambio físico")
     reason: Optional[str] = Field("Cambio de talla/color", max_length=255)
+    exchange_type: str = Field("variant_or_product", pattern="^(same_defective|variant_or_product|month_end_refund)$")
 
 
 class GarmentExchangeCreate(GarmentExchangeQuoteRequest):
     request_key: str = Field(min_length=10, max_length=64)
     confirmed_difference_amount: float = Field(allow_inf_nan=False)
     settlement_confirmed: bool = False
+    additional_payment_method: str = Field("efectivo", pattern="^(efectivo|qr|tarjeta|transferencia)$")
 
 
 class GarmentExchangeSchema(BaseModel):
@@ -102,9 +104,14 @@ class GarmentExchangeSchema(BaseModel):
     new_variant_id: int
     quantity: int
     reason: Optional[str] = None
+    exchange_type: Optional[str] = "variant_or_product"
     difference_amount: float
+    additional_payment_method: Optional[str] = None
     request_key: Optional[str] = None
     settlement_method: Optional[str] = None
+    disbursement_status: Optional[str] = None
+    scheduled_for: Optional[datetime] = None
+    settled_at: Optional[datetime] = None
     status: str
     created_at: datetime
     days_since_purchase: Optional[int] = None

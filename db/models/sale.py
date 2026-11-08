@@ -102,10 +102,16 @@ class GarmentExchange(Base):
     quantity = Column(Integer, default=1, nullable=False)
     
     reason = Column(String, nullable=True)  # Ej: 'Cambio de talla', 'Cambio de color', 'Preferencia'
+    exchange_type = Column(String(30), default="variant_or_product", server_default="variant_or_product", nullable=False)  # 'same_defective' | 'variant_or_product'
     difference_amount = Column(Float, default=0.0, nullable=False)  # Diferencia de precio (positiva si la nueva prenda es más cara)
+    additional_payment_method = Column(String(20), nullable=True)  # 'efectivo', 'qr', 'tarjeta', 'transferencia' cuando difference_amount > 0
     request_key = Column(String(64), nullable=True)
     request_fingerprint = Column(String(64), nullable=True)
-    settlement_method = Column(String(20), nullable=True)  # cash / none; NULL for legacy records
+    settlement_method = Column(String(20), nullable=True)  # cash / none / month_end; NULL for legacy records
+    # Solo para exchange_type='month_end_refund': el ítem deseado no existía y el dinero se devuelve en el ajuste mensual.
+    disbursement_status = Column(String(30), nullable=True)  # 'PENDING_MONTH_END' | 'COMPLETED'
+    scheduled_for = Column(DateTime(timezone=True), nullable=True)
+    settled_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String, default="APPROVED", nullable=False)      # 'APPROVED', 'REJECTED'
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

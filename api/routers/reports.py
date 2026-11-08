@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from core.exchange_reporting import exchange_summary, full_return_summary
+from core.exchange_reporting import exchange_summary, full_return_summary, month_end_return_summary
 from core.access import company_id
 
 from db.database import get_db
@@ -84,6 +84,7 @@ def get_sales_report_json(
     
     return {
         "full_returns": full_return_summary(db,current_user,start_date,end_date,order_type,payment_method),
+        "month_end_returns": month_end_return_summary(db,current_user,start_date,end_date,order_type),
         "exchange_settlements": exchange_summary(db,current_user,start_date,end_date,order_type,payment_method),
         "total_revenue": total_revenue,
         "count": len(data),

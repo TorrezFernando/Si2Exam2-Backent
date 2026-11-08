@@ -105,3 +105,95 @@ def test_original_product_can_be_inactive(shop, monkeypatch):
     shop.db.add(Inventory(tenant_id=shop.cashier.tenant_id, branch_id=shop.branch.id, variant_id=new_variant.id, stock=1))
     shop.product.is_active = False; shop.db.commit()
     assert exchange_garment(order.id, payload(shop, new_variant_id=new_variant.id), shop.db, shop.cashier).difference_amount == 30
+
+
+def test_defective_same_product_exchange_and_additional_payment_when_higher_price(shop, monkeypatch):
+    order = prepare(shop, monkeypatch)
+    # 1) Cambio por el mismo producto (defectuoso): sin diferencia de precio y la prenda defectuosa no infla el stock vendible
+    quoted_same = quote_exchange(
+        order.id,
+        GarmentExchangeQuoteRequest(
+            original_variant_id=shop.a.id,
+            new_variant_id=shop.a.id,
+            branch_id=shop.branch.id,
+            quantity=1,
+            reason='Prenda defectuosa - reposición mismo producto',
+            exchange_type='same_defective',
+        ),
+        shop.db,
+        shop.cashier,
+    )
+    assert quoted_same['difference_amount'] == 0
+    assert quoted_same['exchange_type'] == 'same_defective'
+    same_res = exchange_garment(
+        order.id,
+        payload(
+            shop,
+            original_variant_id=shop.a.id,
+            new_variant_id=shop.a.id,
+            confirmed_difference_amount=0,
+            exchange_type='same_defective',
+            reason='Prenda defectuosa - reposición mismo producto',
+            request_key='test-defective-same-0001',
+        ),
+        shop.db,
+        shop.cashier,
+    )
+    assert same_res.exchange_type == 'same_defective'
+    assert same_res.difference_amount == 0
+    # Se entregó 1 unidad buena de shop.a (stock baja de 3 a 2) y la defectuosa quedó como merma sin reingresar a stock vendible
+    assert stock(shop) == 2
+
+    # 2) Si cambia por otro producto que supera el precio, registra el dinero adicional aumentado y el método de pago
+    higher_res = exchange_garment(
+        order.id,
+        payload(
+            shop,
+            original_variant_id=shop.a.id,
+            new_variant_id=shop.b.id,
+            confirmed_difference_amount=30,
+            additional_payment_method='qr',
+            request_key='test-higher-price-0002',
+        ),
+        shop.db,
+        shop.cashier,
+    )
+    assert higher_res.difference_amount == 30
+    assert higher_res.additional_payment_method == 'qr'
+
+
+
+def test_month_end_refund_of_single_item_when_desired_item_does_not_exist(shop, monkeypatch):
+    from api.routers.full_returns import preview, list_month_end_returns, settle_exchange_month_end
+    from core.exchange_reporting import month_end_return_summary
+    from db.models import Permission
+    order = prepare(shop, monkeypatch)
+    shop.cashier.role.permissions.append(Permission(name='sales:read')); shop.db.commit()
+    month_end = dict(new_variant_id=shop.b.id, exchange_type='month_end_refund', reason='No existe la talla L')
+
+    # Con stock disponible del ítem deseado se exige el cambio normal.
+    with pytest.raises(HTTPException) as e:
+        quote_exchange(order.id, GarmentExchangeQuoteRequest(original_variant_id=shop.a.id, branch_id=shop.branch.id, **month_end), shop.db, shop.cashier)
+    assert e.value.status_code == 409
+
+    shop.db.query(Inventory).filter_by(variant_id=shop.b.id, branch_id=shop.branch.id).update({'stock': 0}); shop.db.commit()
+    quoted = quote_exchange(order.id, GarmentExchangeQuoteRequest(original_variant_id=shop.a.id, branch_id=shop.branch.id, **month_end), shop.db, shop.cashier)
+    assert quoted['action'] == 'refund_month_end' and quoted['refund_amount'] == 120 and quoted['difference_amount'] == -120
+    assert quoted['scheduled_for'].startswith('2026-10-31')
+
+    row = exchange_garment(order.id, payload(shop, confirmed_difference_amount=-120, request_key='month-end-item-0001', **month_end), shop.db, shop.cashier)
+    assert row.exchange_type == 'month_end_refund' and row.disbursement_status == 'PENDING_MONTH_END'
+    assert row.additional_payment_method is None
+    # La prenda recibida vuelve al stock y no se entrega ninguna otra.
+    assert stock(shop) == 4 and stock(shop, shop.b.id) == 0
+
+    # Solo se devuelve esa prenda: la otra unidad de la venta sigue vigente.
+    assert preview(order.id, shop.db, shop.cashier, refund_timing='MONTH_END')['refund_amount'] == 120
+    summary = month_end_return_summary(shop.db, shop.cashier)
+    assert summary['pending_count'] == 1 and summary['pending_amount'] == 120
+    listed = list_month_end_returns(shop.db, shop.cashier)
+    assert listed[0]['source'] == 'exchange' and listed[0]['refund_amount'] == 120
+
+    settled = settle_exchange_month_end(row.id, shop.db, shop.cashier)
+    assert settled['disbursement_status'] == 'COMPLETED' and settled['settled_at'] is not None
+    assert month_end_return_summary(shop.db, shop.cashier)['settled_amount'] == 120
