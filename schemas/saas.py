@@ -105,6 +105,26 @@ class ChangePlanRequest(BaseModel):
     plan_code: str = Field(..., description="Código del nuevo plan ('basic', 'professional', 'enterprise')")
 
 
+class SubscriptionCheckoutRequest(BaseModel):
+    kind: str = Field(..., pattern="^(change_plan|renew)$")
+    plan_code: Optional[str] = Field(None, max_length=30)
+
+
+class SubscriptionCheckoutResponse(BaseModel):
+    payment_id: int
+    kind: str
+    status: str            # pending | applied | failed | cancelled
+    amount: float
+    currency: str
+    provider: str
+    payment_url: Optional[str] = None
+    plan: Optional[SubscriptionPlanSchema] = None
+    error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    paid_at: Optional[datetime] = None
+    tenant: Optional["TenantDetailSchema"] = None
+
+
 class AutoCancelUpdateRequest(BaseModel):
     cancel_at_period_end: bool = Field(..., description="Si es True, la suscripción se cancela automáticamente al acabar el mes")
 

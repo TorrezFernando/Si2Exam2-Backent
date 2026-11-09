@@ -64,25 +64,25 @@ def call(method, path, payload=None, request_id=None, allow=()):
         _fail()
 
 
-def register(order):
-    web = settings.PUBLIC_WEB_URL.rstrip('/')
+def create_checkout(reference, amount_usd, description, return_url, cancel_url):
+    """Crea una orden PayPal en USD y devuelve (id, enlace de aprobación HTTPS)."""
     result = call('POST', '/v2/checkout/orders', {
         'intent': 'CAPTURE',
         'purchase_units': [{
-            'reference_id': str(order.id),
-            'custom_id': order.transaction_ref,
-            'invoice_id': order.transaction_ref,
-            'description': f'FashionStore orden {order.id} (Bs {order.total_amount:.2f})',
-            'amount': {'currency_code': CURRENCY, 'value': f'{usd_amount(order):.2f}'},
+            'reference_id': reference[:256],
+            'custom_id': reference,
+            'invoice_id': reference,
+            'description': description[:127],
+            'amount': {'currency_code': CURRENCY, 'value': f'{Decimal(str(amount_usd)):.2f}'},
         }],
         'payment_source': {'paypal': {'experience_context': {
             'brand_name': 'FashionStore',
             'user_action': 'PAY_NOW',
             'shipping_preference': 'NO_SHIPPING',
-            'return_url': f'{web}/payment/{order.id}',
-            'cancel_url': f'{web}/payment/{order.id}?cancelled=1',
+            'return_url': return_url,
+            'cancel_url': cancel_url,
         }}},
-    }, request_id=f'create-{order.transaction_ref}')
+    }, request_id=f'create-{reference}')
     url = next((link.get('href', '') for link in result.get('links', [])
                 if link.get('rel') in ('payer-action', 'approve')), '')
     if urlparse(url).scheme != 'https' or not result.get('id'):
@@ -90,30 +90,41 @@ def register(order):
     return str(result['id']), url
 
 
-def _captured(result, order):
+def register(order):
+    web = settings.PUBLIC_WEB_URL.rstrip('/')
+    return create_checkout(order.transaction_ref, usd_amount(order),
+                           f'FashionStore orden {order.id} (Bs {order.total_amount:.2f})',
+                           f'{web}/payment/{order.id}', f'{web}/payment/{order.id}?cancelled=1')
+
+
+def _captured(result, reference, expected):
     units = result.get('purchase_units') or []
     if result.get('status') != 'COMPLETED' or len(units) != 1:
         return False
     unit = units[0]
-    if unit.get('custom_id') not in (None, order.transaction_ref):
+    if unit.get('custom_id') not in (None, reference):
         return False
-    expected = f'{usd_amount(order):.2f}'
     for capture in (unit.get('payments') or {}).get('captures') or []:
         amount = capture.get('amount') or {}
         if (capture.get('status') == 'COMPLETED' and amount.get('currency_code') == CURRENCY
                 and amount.get('value') == expected
-                and capture.get('custom_id', order.transaction_ref) == order.transaction_ref):
+                and capture.get('custom_id', reference) == reference):
             return True
     return False
 
 
-def is_paid(order):
-    path = f'/v2/checkout/orders/{order.payment_id}'
+def is_captured(provider_id, reference, amount_usd):
+    """Lee la orden en PayPal, la captura si el comprador la aprobó y valida referencia e importe."""
+    path = f'/v2/checkout/orders/{provider_id}'
     result = call('GET', path)
     if result.get('status') == 'APPROVED':
-        # Buyer approved on PayPal: capture now. A concurrent capture (422) is re-read below.
-        captured = call('POST', f'{path}/capture', {}, request_id=f'capture-{order.transaction_ref}', allow=(422,))
+        # A concurrent capture (422) is re-read below.
+        captured = call('POST', f'{path}/capture', {}, request_id=f'capture-{reference}', allow=(422,))
         result = captured if captured and captured.get('status') == 'COMPLETED' else call('GET', path)
     if result.get('status') == 'COMPLETED' and not (result.get('purchase_units') or [{}])[0].get('payments'):
         result = call('GET', path)
-    return _captured(result, order)
+    return _captured(result, reference, f'{Decimal(str(amount_usd)):.2f}')
+
+
+def is_paid(order):
+    return is_captured(order.payment_id, order.transaction_ref, usd_amount(order))

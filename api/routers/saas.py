@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session, joinedload
@@ -18,7 +19,8 @@ from core.subscription_plans import (
     process_expired_subscriptions,
 )
 from db.models.user import User
-from db.models.tenant import Tenant, SubscriptionPlan, Subscription
+from db.models.tenant import Tenant, SubscriptionPlan, Subscription, SubscriptionPayment
+from core.config import settings
 from db.models.branch import Branch
 from db.models.product import Product
 from db.models.sale import Order
@@ -36,6 +38,8 @@ from schemas.saas import (
     PlanCreate,
     PlanUpdate,
     AIModelOptions,
+    SubscriptionCheckoutRequest,
+    SubscriptionCheckoutResponse,
 )
 
 router = APIRouter()
@@ -385,34 +389,14 @@ def update_tenant(
 
 # ─── 4. CAMBIAR PLAN, CANCELACIÓN AUTOMÁTICA A FIN DE MES Y RENOVACIÓN ───────
 
-@router.post("/tenants/{tenant_id}/change-plan", response_model=TenantDetailSchema)
-def change_tenant_plan(
-    tenant_id: int,
-    change_in: ChangePlanRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-) -> Any:
-    """
-    Actualiza el plan de suscripción de la empresa (Upgrade / Downgrade) iniciando un ciclo mensual de 30 días.
-    Accesible para el Superadmin o el Admin de la propia empresa.
-    """
-    check_company_admin(db, current_user, tenant_id)
-    is_super = bool(current_user.role and current_user.role.name == "superadmin")
-    if not is_super and current_user.tenant_id != tenant_id:
-        raise HTTPException(status_code=403, detail="No tienes permisos para modificar el plan de esta empresa.")
-
-    process_expired_subscriptions(db, tenant_id=tenant_id)
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).with_for_update().first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Empresa no encontrada")
-
+def _target_plan(db: Session, tenant: Tenant, plan_code: str) -> SubscriptionPlan:
+    """Valida que el plan exista, esté disponible y admita las sucursales activas de la empresa."""
     new_plan = db.query(SubscriptionPlan).filter(
-        SubscriptionPlan.code == change_in.plan_code.strip().lower(),
+        SubscriptionPlan.code == plan_code.strip().lower(),
         SubscriptionPlan.is_active == True,
     ).first()
     if not new_plan:
-        raise HTTPException(status_code=400, detail=f"El plan '{change_in.plan_code}' no existe o no está activo.")
-
+        raise HTTPException(status_code=400, detail=f"El plan '{plan_code}' no existe o no está activo.")
     active_branches = db.query(Branch).filter(Branch.tenant_id == tenant.id, Branch.is_active == True).count()
     if active_branches > new_plan.max_branches:
         raise HTTPException(
@@ -423,54 +407,218 @@ def change_tenant_plan(
                 "Desactiva las sucursales sobrantes antes de reducir el plan."
             ),
         )
+    return new_plan
 
+
+def _apply_plan_change(db: Session, tenant: Tenant, new_plan: SubscriptionPlan, actor_id, via: str) -> Subscription:
+    """Reemplaza la suscripción activa por el nuevo plan con un ciclo de 30 días (sin commit)."""
     prev_subs = db.query(Subscription).filter(Subscription.tenant_id == tenant.id, Subscription.status == "active").all()
     keep_auto_cancel = True
     for ps in prev_subs:
         keep_auto_cancel = bool(ps.cancel_at_period_end)
         ps.status = "upgraded" if new_plan.price > (ps.plan.price if ps.plan else 0) else "downgraded"
-
     now = datetime.now(timezone.utc)
-    new_sub = Subscription(
-        tenant_id=tenant.id,
-        plan_id=new_plan.id,
-        start_date=now,
-        end_date=calculate_period_end(now),
-        cancel_at_period_end=keep_auto_cancel,
-        status="active",
-    )
+    new_sub = Subscription(tenant_id=tenant.id, plan_id=new_plan.id, start_date=now,
+                           end_date=calculate_period_end(now), cancel_at_period_end=keep_auto_cancel, status="active")
     db.add(new_sub)
+    db.flush()
+    log_audit(db, actor_id, "CHANGE_PLAN", "SUBSCRIPTION", str(new_sub.id), {
+        "tenant_id": tenant.id, "new_plan": new_plan.code, "price": new_plan.price, "via": via,
+        "end_date": new_sub.end_date.isoformat(), "cancel_at_period_end": new_sub.cancel_at_period_end,
+    }, tenant_id=tenant.id)
+    return new_sub
+
+
+def _renewal_plan(db: Session, tenant: Tenant) -> SubscriptionPlan:
+    sub = tenant.active_subscription
+    if sub and sub.plan:
+        return sub.plan
+    latest = tenant.latest_subscription
+    plan = latest.plan if (latest and latest.plan and latest.plan.is_active) else (
+        db.query(SubscriptionPlan).filter(SubscriptionPlan.code == "basic", SubscriptionPlan.is_active == True).first()
+    )
+    if not plan:
+        raise HTTPException(status_code=400, detail="No hay un plan activo disponible para renovar.")
+    return plan
+
+
+def _apply_renewal(db: Session, tenant: Tenant, actor_id, via: str, plan: SubscriptionPlan | None = None) -> Subscription:
+    """Suma 30 días a la suscripción activa o abre un ciclo nuevo si estaba vencida (sin commit)."""
+    now = datetime.now(timezone.utc)
+    sub = tenant.active_subscription
+    if sub:
+        current_end = ensure_aware(sub.end_date) or now
+        sub.end_date = calculate_period_end(current_end if current_end > now else now)
+        target_sub = sub
+    else:
+        plan = plan or _renewal_plan(db, tenant)
+        target_sub = Subscription(tenant_id=tenant.id, plan_id=plan.id, start_date=now,
+                                  end_date=calculate_period_end(now), cancel_at_period_end=True, status="active")
+        db.add(target_sub)
+    db.flush()
+    log_audit(db, actor_id, "RENEW", "SUBSCRIPTION", str(target_sub.id),
+              {"tenant_id": tenant.id, "end_date": target_sub.end_date.isoformat(), "via": via}, tenant_id=tenant.id)
+    return target_sub
+
+
+@router.post("/tenants/{tenant_id}/change-plan", response_model=TenantDetailSchema)
+def change_tenant_plan(
+    tenant_id: int,
+    change_in: ChangePlanRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_superadmin),
+) -> Any:
+    """
+    Asignación directa de plan por el Superadmin (sin cobro), con ciclo nuevo de 30 días.
+    Las empresas cambian su propio plan con /my-subscription/checkout, que exige el pago.
+    """
+    process_expired_subscriptions(db, tenant_id=tenant_id)
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).with_for_update().first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    new_plan = _target_plan(db, tenant, change_in.plan_code)
+    _apply_plan_change(db, tenant, new_plan, current_user.id, via="superadmin")
     db.commit()
     db.refresh(tenant)
-
-    log_audit(
-        db,
-        current_user.id,
-        "CHANGE_PLAN",
-        "SUBSCRIPTION",
-        str(new_sub.id),
-        {
-            "tenant_id": tenant.id,
-            "new_plan": new_plan.code,
-            "price": new_plan.price,
-            "end_date": new_sub.end_date.isoformat(),
-            "cancel_at_period_end": new_sub.cancel_at_period_end,
-        },
-        tenant_id=tenant.id,
-    )
-
     return _build_tenant_detail(db, tenant)
 
 
-@router.post("/my-subscription/change-plan", response_model=TenantDetailSchema)
+# ─── Cobro de planes para la propia empresa ──────────────────────────────────
+
+def _payment_out(db: Session, row: SubscriptionPayment, tenant: Tenant | None = None) -> SubscriptionCheckoutResponse:
+    return SubscriptionCheckoutResponse(
+        payment_id=row.id, kind=row.kind, status=row.status, amount=row.amount, currency=row.currency,
+        provider=row.provider, payment_url=row.payment_url if row.status == "pending" else None,
+        plan=_plan_out(db, row.plan), error=row.error, created_at=row.created_at, paid_at=row.paid_at,
+        tenant=_build_tenant_detail(db, tenant) if tenant is not None else None,
+    )
+
+
+def _apply_payment(db: Session, row: SubscriptionPayment, tenant: Tenant, actor_id) -> None:
+    """Aplica el plan pagado. Si ya no puede aplicarse (p. ej. sobran sucursales) lo deja en 'failed' para revisión."""
+    try:
+        if row.kind == "change_plan":
+            plan = _target_plan(db, tenant, row.plan.code)
+            sub = _apply_plan_change(db, tenant, plan, actor_id, via=f"payment:{row.reference}")
+        else:
+            sub = _apply_renewal(db, tenant, actor_id, via=f"payment:{row.reference}", plan=row.plan)
+        row.status, row.subscription_id, row.error = "applied", sub.id, None
+    except HTTPException as error:
+        row.status = "failed"
+        row.error = f"Pago confirmado pero no aplicado: {error.detail}"[:255]
+
+
+@router.post("/my-subscription/checkout", response_model=SubscriptionCheckoutResponse)
+def start_subscription_checkout(
+    checkout_in: SubscriptionCheckoutRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """
+    Inicia el pago de un cambio de plan o de la renovación mensual de la propia empresa.
+    El cambio solo se aplica cuando PayPal confirma el pago (ver /my-subscription/payments/{id}/verify).
+    Un plan con precio 0 se aplica de inmediato.
+    """
+    from core import paypal
+    tenant_id = company_id(current_user)
+    check_company_admin(db, current_user, tenant_id)
+    process_expired_subscriptions(db, tenant_id=tenant_id)
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).with_for_update().first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    if checkout_in.kind == "change_plan":
+        if not checkout_in.plan_code:
+            raise HTTPException(422, "Indica el plan al que deseas cambiar.")
+        plan = _target_plan(db, tenant, checkout_in.plan_code)
+        current = tenant.active_subscription
+        if current and current.plan_id == plan.id:
+            raise HTTPException(409, "La empresa ya tiene este plan. Usa la renovación para extender el mes.")
+    else:
+        plan = _renewal_plan(db, tenant)
+
+    amount = float(round(plan.price or 0, 2))
+    if amount <= 0:
+        row = SubscriptionPayment(tenant_id=tenant.id, plan_id=plan.id, user_id=current_user.id, kind=checkout_in.kind,
+                                  amount=0.0, provider="Gratis", reference=f"SUB-{uuid4().hex}", status="pending",
+                                  paid_at=datetime.now(timezone.utc))
+        db.add(row); db.flush()
+        _apply_payment(db, row, tenant, current_user.id)
+        db.commit(); db.refresh(tenant)
+        return _payment_out(db, row, tenant)
+
+    # Reutiliza un cobro pendiente idéntico para no crear órdenes duplicadas en PayPal.
+    pending = db.query(SubscriptionPayment).filter(
+        SubscriptionPayment.tenant_id == tenant.id, SubscriptionPayment.kind == checkout_in.kind,
+        SubscriptionPayment.plan_id == plan.id, SubscriptionPayment.status == "pending",
+        SubscriptionPayment.amount == amount, SubscriptionPayment.payment_url.isnot(None),
+    ).order_by(SubscriptionPayment.id.desc()).first()
+    if pending:
+        db.commit()
+        return _payment_out(db, pending)
+
+    paypal.ensure_configured()
+    row = SubscriptionPayment(tenant_id=tenant.id, plan_id=plan.id, user_id=current_user.id, kind=checkout_in.kind,
+                              amount=amount, currency=paypal.CURRENCY, provider="PayPal",
+                              reference=f"SUB-{uuid4().hex}", status="pending")
+    db.add(row); db.flush()
+    web = settings.PUBLIC_WEB_URL.rstrip("/")
+    action = f"Cambio al {plan.name}" if checkout_in.kind == "change_plan" else f"Renovación {plan.name}"
+    row.provider_order_id, row.payment_url = paypal.create_checkout(
+        row.reference, amount, f"FashionStore SaaS · {action} · {tenant.name} (30 días)",
+        f"{web}/admin/plans?sub_payment={row.id}", f"{web}/admin/plans?sub_payment={row.id}&cancelled=1")
+    db.commit()
+    log_audit(db, current_user.id, "CHECKOUT", "SUBSCRIPTION_PAYMENT", str(row.id),
+              {"kind": row.kind, "plan": plan.code, "amount": amount}, tenant_id=tenant.id)
+    return _payment_out(db, row)
+
+
+@router.post("/my-subscription/payments/{payment_id}/verify", response_model=SubscriptionCheckoutResponse)
+def verify_subscription_payment(
+    payment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Confirma el pago con PayPal en el servidor y, si está pagado, aplica el plan una sola vez."""
+    from core import paypal
+    tenant_id = company_id(current_user)
+    check_company_admin(db, current_user, tenant_id)
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).with_for_update().first()
+    row = db.query(SubscriptionPayment).filter(SubscriptionPayment.id == payment_id,
+        SubscriptionPayment.tenant_id == tenant_id).with_for_update().first()
+    if not tenant or not row:
+        raise HTTPException(404, "Pago no encontrado.")
+    if row.status == "pending" and row.provider_order_id:
+        if paypal.is_captured(row.provider_order_id, row.reference, row.amount):
+            row.paid_at = datetime.now(timezone.utc)
+            process_expired_subscriptions(db, tenant_id=tenant_id, commit=False)
+            db.refresh(tenant)
+            _apply_payment(db, row, tenant, current_user.id)
+    db.commit()
+    db.refresh(tenant)
+    return _payment_out(db, row, tenant)
+
+
+@router.get("/my-subscription/payments", response_model=List[SubscriptionCheckoutResponse])
+def list_subscription_payments(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    tenant_id = company_id(current_user)
+    check_company_admin(db, current_user, tenant_id)
+    rows = db.query(SubscriptionPayment).filter(SubscriptionPayment.tenant_id == tenant_id).order_by(
+        SubscriptionPayment.id.desc()).limit(50).all()
+    return [_payment_out(db, r) for r in rows]
+
+
+@router.post("/my-subscription/change-plan", response_model=SubscriptionCheckoutResponse)
 def change_my_plan(
     change_in: ChangePlanRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    """Permite al Admin de una empresa actualizar o cambiar su propio plan de suscripción."""
-    tenant_id = company_id(current_user)
-    return change_tenant_plan(tenant_id, change_in, db, current_user)
+    """Compatibilidad: el cambio de plan de la propia empresa pasa siempre por el cobro."""
+    return start_subscription_checkout(SubscriptionCheckoutRequest(kind="change_plan", plan_code=change_in.plan_code),
+                                       db, current_user)
 
 
 @router.patch("/tenants/{tenant_id}/auto-cancel", response_model=TenantDetailSchema)
@@ -526,63 +674,26 @@ def set_my_auto_cancel(
 def renew_tenant_subscription(
     tenant_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_superadmin),
 ) -> Any:
-    """Renueva por 30 días adicionales la suscripción actual (o reactiva la última suscripción cancelada/vencida)."""
-    check_company_admin(db, current_user, tenant_id)
+    """Renovación directa por el Superadmin (sin cobro). Las empresas renuevan con /my-subscription/checkout."""
     process_expired_subscriptions(db, tenant_id=tenant_id)
-
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).with_for_update().first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
-
-    now = datetime.now(timezone.utc)
-    sub = tenant.active_subscription
-    if sub:
-        current_end = ensure_aware(sub.end_date) or now
-        base = current_end if current_end > now else now
-        sub.end_date = calculate_period_end(base)
-        target_sub = sub
-    else:
-        latest = tenant.latest_subscription
-        plan = latest.plan if (latest and latest.plan and latest.plan.is_active) else (
-            db.query(SubscriptionPlan).filter(SubscriptionPlan.code == "basic", SubscriptionPlan.is_active == True).first()
-        )
-        if not plan:
-            raise HTTPException(status_code=400, detail="No hay un plan activo disponible para renovar.")
-        target_sub = Subscription(
-            tenant_id=tenant.id,
-            plan_id=plan.id,
-            start_date=now,
-            end_date=calculate_period_end(now),
-            cancel_at_period_end=True,
-            status="active",
-        )
-        db.add(target_sub)
-
+    _apply_renewal(db, tenant, current_user.id, via="superadmin")
     db.commit()
     db.refresh(tenant)
-
-    log_audit(
-        db,
-        current_user.id,
-        "RENEW",
-        "SUBSCRIPTION",
-        str(target_sub.id),
-        {"tenant_id": tenant.id, "end_date": target_sub.end_date.isoformat()},
-        tenant_id=tenant.id,
-    )
     return _build_tenant_detail(db, tenant)
 
 
-@router.post("/my-subscription/renew", response_model=TenantDetailSchema)
+@router.post("/my-subscription/renew", response_model=SubscriptionCheckoutResponse)
 def renew_my_subscription(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    """Permite al Admin de Empresa renovar su suscripción por un mes adicional (30 días)."""
-    tenant_id = company_id(current_user)
-    return renew_tenant_subscription(tenant_id, db, current_user)
+    """Compatibilidad: la renovación de la propia empresa pasa siempre por el cobro."""
+    return start_subscription_checkout(SubscriptionCheckoutRequest(kind="renew"), db, current_user)
 
 
 @router.post("/subscriptions/process-expirations")

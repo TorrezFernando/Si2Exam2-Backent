@@ -9,6 +9,27 @@ from api.deps import verify_branch_limit, require_feature
 from api.routers import branches, reservations
 
 
+def pay(api, monkeypatch, path, json=None):
+    """Company plan changes/renewals go through PayPal: start checkout, approve (simulated) and verify."""
+    from core import paypal
+    monkeypatch.setattr(paypal, 'ensure_configured', lambda: None)
+    monkeypatch.setattr(paypal, 'create_checkout', lambda ref, *a: (f'PP-{ref}', 'https://www.sandbox.paypal.com/checkoutnow?token=x'))
+    monkeypatch.setattr(paypal, 'is_captured', lambda *a: False)
+    started = api.post(path, json=json)
+    assert started.status_code == 200, started.text
+    assert started.json()['status'] == 'pending' and started.json()['payment_url'].startswith('https://')
+    payment_id = started.json()['payment_id']
+    # Sin pago confirmado no cambia nada
+    assert api.post(f'/saas/my-subscription/payments/{payment_id}/verify').json()['status'] == 'pending'
+    monkeypatch.setattr(paypal, 'is_captured', lambda *a: True)
+    verified = api.post(f'/saas/my-subscription/payments/{payment_id}/verify')
+    assert verified.status_code == 200, verified.text
+    assert verified.json()['status'] == 'applied'
+    # Reintentar la verificación no vuelve a aplicar el plan
+    assert api.post(f'/saas/my-subscription/payments/{payment_id}/verify').json()['status'] == 'applied'
+    return verified.json()['tenant']
+
+
 def prepare(shop):
     plans = ensure_plans(shop.db)
     shop.user.role.permissions.append(Permission(name='branches:write'))
@@ -26,12 +47,11 @@ def test_three_plans_preserve_existing_configuration(shop):
     assert next(p for p in rows if p['code'] == 'enterprise')['price'] == 210
 
 
-def test_enterprise_upgrade_features_limit_and_downgrade(shop):
+def test_enterprise_upgrade_features_limit_and_downgrade(shop, monkeypatch):
     prepare(shop)
     api = client(shop, shop.user)
-    response = api.post('/saas/my-subscription/change-plan', json={'plan_code': 'enterprise'})
-    assert response.status_code == 200, response.text
-    assert response.json()['active_plan']['max_branches'] == 30
+    tenant = pay(api, monkeypatch, '/saas/my-subscription/change-plan', {'plan_code': 'enterprise'})
+    assert tenant['active_plan']['max_branches'] == 30
     request = Request({'type': 'http', 'headers': []})
     assert require_feature('ai_reports')(request, shop.user, shop.db) == shop.user
     existing = shop.db.query(Branch).filter_by(tenant_id=shop.tenant.id, is_active=True).count()
@@ -65,13 +85,12 @@ def test_customer_cannot_select_enterprise(shop):
     assert response.status_code == 403
 
 
-def test_monthly_subscription_auto_cancels_at_period_end_and_renews(shop):
+def test_monthly_subscription_auto_cancels_at_period_end_and_renews(shop, monkeypatch):
     prepare(shop)
     api = client(shop, shop.user)
 
-    # Upgrade to professional: sets 30-day end_date and cancel_at_period_end=True by default
-    res = api.post('/saas/my-subscription/change-plan', json={'plan_code': 'professional'})
-    assert res.status_code == 200, res.text
+    # Upgrade to professional (paid): sets 30-day end_date and cancel_at_period_end=True by default
+    pay(api, monkeypatch, '/saas/my-subscription/checkout', {'kind': 'change_plan', 'plan_code': 'professional'})
     sub = shop.db.query(Subscription).filter_by(tenant_id=shop.tenant.id, status='active').one()
     assert sub.cancel_at_period_end is True
     assert sub.end_date is not None
@@ -111,10 +130,9 @@ def test_monthly_subscription_auto_cancels_at_period_end_and_renews(shop):
     assert branch_err.value.status_code == 403
 
     # Renew for another 30-day cycle
-    renewed = api.post('/saas/my-subscription/renew')
-    assert renewed.status_code == 200, renewed.text
-    assert renewed.json()['subscription_status'] == 'active'
-    assert renewed.json()['days_remaining'] >= 29
+    renewed = pay(api, monkeypatch, '/saas/my-subscription/renew')
+    assert renewed['subscription_status'] == 'active'
+    assert renewed['days_remaining'] >= 29
     assert require_feature('ai_reports')(request, shop.user, shop.db) == shop.user
 
 
@@ -145,3 +163,22 @@ def test_superadmin_is_strictly_separated_from_company_modules(shop):
     assert api.get('/operations/masters/categories').status_code == 403
     assert api.get('/reservations/').status_code == 403
 
+
+
+def test_company_cannot_bypass_payment_with_superadmin_routes(shop):
+    prepare(shop)
+    api = client(shop, shop.user)
+    before = shop.db.query(Subscription).filter_by(tenant_id=shop.tenant.id, status='active').one().plan_id
+    assert api.post(f'/saas/tenants/{shop.tenant.id}/change-plan', json={'plan_code': 'enterprise'}).status_code == 403
+    assert api.post(f'/saas/tenants/{shop.tenant.id}/renew').status_code == 403
+    shop.db.expire_all()
+    assert shop.db.query(Subscription).filter_by(tenant_id=shop.tenant.id, status='active').one().plan_id == before
+
+
+def test_paid_plan_requires_configured_gateway(shop, monkeypatch):
+    from core import paypal
+    from core.config import settings
+    prepare(shop)
+    monkeypatch.setattr(settings, 'PAYPAL_CLIENT_ID', '')
+    response = client(shop, shop.user).post('/saas/my-subscription/checkout', json={'kind': 'change_plan', 'plan_code': 'enterprise'})
+    assert response.status_code == 503

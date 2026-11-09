@@ -76,6 +76,33 @@ class SubscriptionPlan(Base):
     subscriptions = relationship("Subscription", back_populates="plan")
 
 
+class SubscriptionPayment(Base):
+    """
+    Cobro de un cambio de plan o renovación hecho por la propia empresa.
+    El plan solo se aplica cuando el servidor confirma el pago con la pasarela.
+    """
+    __tablename__ = "subscription_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    plan_id = Column(Integer, ForeignKey("subscription_plans.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    kind = Column(String(20), nullable=False)          # 'change_plan' | 'renew'
+    amount = Column(Float, nullable=False)              # USD, precio del plan al iniciar el cobro
+    currency = Column(String(3), default="USD", nullable=False)
+    provider = Column(String(20), default="PayPal", nullable=False)
+    reference = Column(String(64), unique=True, nullable=False)
+    provider_order_id = Column(String(64), unique=True, nullable=True)
+    payment_url = Column(String, nullable=True)
+    status = Column(String(20), default="pending", nullable=False)  # pending | applied | failed | cancelled
+    error = Column(String(255), nullable=True)
+    subscription_id = Column(Integer, ForeignKey("subscriptions.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+
+    plan = relationship("SubscriptionPlan")
+
+
 class Subscription(Base):
     """
     Suscripción de un Tenant a un Plan específico con vigencia y estado.

@@ -1,5 +1,5 @@
 from db.database import Base
-from db.models.tenant import Tenant, SubscriptionPlan, Subscription
+from db.models.tenant import Tenant, SubscriptionPlan, Subscription, SubscriptionPayment
 from db.models.user import User
 from db.models.branch import Branch, Inventory
 from db.models.product import Category, Product, ProductVariant
