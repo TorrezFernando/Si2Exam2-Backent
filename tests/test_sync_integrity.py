@@ -187,3 +187,22 @@ def test_only_superadmin_can_select_explicit_header_context(shop):
     assert selected_store(shop.db,shop.user,request=request).id==shop.tenant.id
     superadmin=SimpleNamespace(tenant_id=None,is_active=True,role=SimpleNamespace(name='superadmin'))
     assert selected_store(shop.db,superadmin,request=request).id==shop.foreign.tenant_id
+
+
+def test_customer_reservation_resent_many_times_is_saved_once(shop):
+    """El cliente reserva sin señal y el dispositivo reenvía la misma reserva varias veces
+    (botón presionado de nuevo, pérdida de respuesta, otra pestaña): el servidor la guarda una sola vez."""
+    from db.models import Reservation
+    op = dict(client_operation_uuid='customer-reservation-0001', user_id=shop.customer.id,
+              items=[dict(variant_id=shop.variant.id, quantity=1)])
+    receipts = [send(shop, reservations=[op], user=shop.customer) for _ in range(3)]
+    assert receipts[0].confirmed_count == 1
+    assert {r.receipts[0].model_dump_json() for r in receipts} == {receipts[0].receipts[0].model_dump_json()}
+    # Aunque llegue repetida dentro de un mismo lote
+    repeated = dict(op, client_operation_uuid='customer-reservation-0002')
+    try:
+        send(shop, reservations=[repeated, repeated], user=shop.customer)
+    except HTTPException:
+        pass  # el lote con duplicados puede rechazarse completo; lo importante es no duplicar
+    assert shop.db.query(Reservation).filter_by(client_operation_uuid='customer-reservation-0002').count() <= 1
+    assert shop.db.query(Reservation).filter_by(client_operation_uuid='customer-reservation-0001').count() == 1
