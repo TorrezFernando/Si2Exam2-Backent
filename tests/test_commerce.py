@@ -159,11 +159,14 @@ def test_repeated_checkout_does_not_duplicate_stock_discount(shop):
     assert stock(shop) == 3
 
 
-def test_unknown_role_only_sees_own_orders(shop):
+def test_unknown_role_without_company_cannot_list_orders(shop):
+    # Desde la separación del superadmin, un usuario sin empresa no accede a módulos de empresa.
     sale(shop)
     user = User(email='custom@example.com', hashed_password='unused', role=Role(name='custom'))
     shop.db.add(user); shop.db.commit()
-    assert orders_query(shop.db, user).count() == 0
+    with pytest.raises(HTTPException) as error:
+        orders_query(shop.db, user).count()
+    assert error.value.status_code == 403
 
 
 def test_revoked_sale_permission_is_respected(shop):
