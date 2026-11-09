@@ -123,8 +123,10 @@ async def get_recommended_products(
         cat_prefs = {}
         viewed_products = []
         
-    if not viewed_products and not cat_prefs:
-        # Si no hay preferencias, devolver los primeros
+    from core.plan_features import current_plan, text_model
+    plan = current_plan(db, tenant.id)
+    if (not viewed_products and not cat_prefs) or not plan or not plan.has_ai_shopper:
+        # Sin preferencias, o el plan no incluye recomendaciones IA: devolver los primeros
         return all_products[:limit]
         
     # Preparar el catálogo para Gemini
@@ -138,7 +140,8 @@ async def get_recommended_products(
         viewed_products=viewed_products,
         category_prefs=cat_prefs,
         available_products=available_catalog,
-        limit=limit
+        limit=limit,
+        model=text_model(plan),
     )
     
     # Fallback si Gemini falla o no devuelve suficientes
@@ -262,6 +265,8 @@ def create_product(
             raise HTTPException(status_code=404, detail="Categoría no encontrada")
 
     validate_references(db, product_in, current_user)
+    from core.plan_features import enforce_limit
+    enforce_limit(db, company_id(current_user), 'products')
     product = Product(
         tenant_id=company_id(current_user),
         name=product_in.name,

@@ -71,6 +71,9 @@ def create_user_by_admin(
     check_assign_role(db, current_user, role)
     if role.name == 'superadmin':
         raise HTTPException(403, 'Los roles globales no pueden asignarse a una empresa.')
+    if role.name != 'cliente':
+        from core.plan_features import enforce_limit
+        enforce_limit(db, tenant_id, 'users')
 
     # Logica simple para obligar branch a encargados/cajeros
     if role.name in ("cajero", "encargado") and not user_in.branch_id:
@@ -153,6 +156,13 @@ def update_user(
 
     update_data = user_in.model_dump(exclude_unset=True)
     update_data.pop("tenant_id", None)
+    # Reactivar o pasar un cliente a personal consume un cupo del plan.
+    def counts_as_staff(active, role_obj):
+        return bool(active) and (role_obj is None or role_obj.name != 'cliente')
+    new_role = db.get(Role, update_data['role_id']) if update_data.get('role_id') is not None else user.role
+    if not counts_as_staff(user.is_active, user.role) and counts_as_staff(update_data.get('is_active', user.is_active), new_role):
+        from core.plan_features import enforce_limit
+        enforce_limit(db, tenant_id, 'users')
     old_values = {k: getattr(user, k) for k in update_data.keys()}
 
     for field, value in update_data.items():

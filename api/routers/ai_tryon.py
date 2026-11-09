@@ -62,6 +62,10 @@ async def virtual_tryon(
     product = db.query(Product).filter(Product.id == product_id, Product.tenant_id == company_id(current_user), Product.is_active.is_(True)).first()
     if not product:
         raise HTTPException(status_code=404, detail="Producto no encontrado.")
+    from core.plan_features import current_plan, image_model
+    plan = current_plan(db, product.tenant_id)
+    if not plan or not plan.has_ai_tryon:
+        raise HTTPException(status_code=403, detail="El probador virtual con IA no está incluido en el plan de esta tienda.")
 
     variant = db.query(ProductVariant).filter_by(id=variant_id, product_id=product.id, tenant_id=product.tenant_id).first()
     if not variant:
@@ -118,6 +122,7 @@ async def virtual_tryon(
             garment_image_bytes=garment_bytes,
             garment_type=product.garment_type or "upper_body",
             product_name=product.name, selected_size=variant.size, selected_color=variant.color,
+            model=image_model(plan),
         ), timeout=150)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

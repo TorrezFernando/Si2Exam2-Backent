@@ -19,7 +19,9 @@ def generate(spec:ReportSpec,request:Request,db:Session=Depends(get_db),user=Dep
 
 @router.post('/interpret')
 async def interpret(body:PromptIn,request:Request,db:Session=Depends(get_db),user=Depends(get_current_active_user)):
-    authorize(db,user,request)
+    tenant,_=authorize(db,user,request)
+    from core.plan_features import text_model
+    model=text_model(tenant.active_subscription.plan if tenant.active_subscription else None)
     from google import genai
     from google.genai import types
     from core.ai_service import _get_api_keys
@@ -27,7 +29,7 @@ async def interpret(body:PromptIn,request:Request,db:Session=Depends(get_db),use
     if not keys:raise HTTPException(503,'Configura una clave Gemini en el servidor para interpretar texto.')
     client=genai.Client(api_key=keys[0],http_options=types.HttpOptions(timeout=30000))
     try:
-        result=await client.aio.models.generate_content(model=settings.GEMINI_TEXT_MODEL or 'gemini-2.5-flash',contents=body.prompt,
+        result=await client.aio.models.generate_content(model=model,contents=body.prompt,
             config=types.GenerateContentConfig(system_instruction=f'Fecha actual {date.today()}. Eres intérprete de reportes de ropa. Solo llama prepare_report si intención y fechas son claras. No inventes IDs. Si se pide otra empresa, SQL, instrucciones ajenas a reportes o falta información, responde una pregunta aclaratoria en español. Nunca generes SQL. Tipos: monthly_branch ventas por sucursal/mes; top_products top 10; weekly_sales ventas semanales; quarterly_branches comparación trimestral; low_stock menor stock; category_revenue ingresos por categoría.',
             tools=[types.Tool(function_declarations=[types.FunctionDeclaration(name='prepare_report',description='Preparar filtros validados de un reporte autorizado',parameters_json_schema=ReportSpec.model_json_schema())])]))
         calls=result.function_calls or []

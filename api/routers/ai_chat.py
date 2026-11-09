@@ -65,6 +65,12 @@ async def chat_with_ai(
     if tenant is None:
         return ChatResponse(response='Selecciona una tienda o inicia sesión para consultar su catálogo.')
     products = db.query(Product).filter(Product.is_active.is_(True), Product.tenant_id == tenant.id).limit(50).all()
+    from core.plan_features import current_plan, text_model
+    plan = current_plan(db, tenant.id)
+    if not plan or not plan.has_ai_shopper:
+        # El plan de la tienda no incluye el Personal Shopper IA: respuesta guiada sin llamar a Gemini.
+        return ChatResponse(response=_fallback_shopper_response(
+            tenant.name, products, request.messages[-1].content if request.messages else ""))
     catalog_context = "Catálogo de productos disponibles:\n"
     for p in products:
         cat = p.category.name if p.category else "Otros"
@@ -93,6 +99,7 @@ async def chat_with_ai(
     ))
     models_to_try = list(dict.fromkeys(
         m for m in [
+            text_model(plan),
             settings.GEMINI_TEXT_MODEL,
             "gemini-2.5-flash",
             "gemini-2.0-flash",

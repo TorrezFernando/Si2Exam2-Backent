@@ -54,6 +54,7 @@ async def generate_tryon(
     product_name: str = "la prenda",
     selected_size: str = "",
     selected_color: str = "",
+    model: str | None = None,
 ) -> bytes:
     user_png = _to_png_bytes(user_photo_bytes)
     garment_png = _to_png_bytes(garment_image_bytes)
@@ -98,7 +99,7 @@ Rules: Preserve the person's face, hair, body shape exactly. Only change the clo
         client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=65000))
         try:
             response = await asyncio.wait_for(asyncio.to_thread(client.models.generate_content,
-                model=settings.GEMINI_MODEL,
+                model=model or settings.GEMINI_MODEL,
                 contents=[prompt, types.Part.from_bytes(data=user_png, mime_type="image/png"),
                           types.Part.from_bytes(data=garment_png, mime_type="image/png")],
                 config=types.GenerateContentConfig(response_modalities=["IMAGE", "TEXT"], temperature=0.4)), timeout=70)
@@ -121,7 +122,8 @@ async def generate_recommendations(
     viewed_products: list[str],
     category_prefs: dict,
     available_products: list[dict],
-    limit: int = 4
+    limit: int = 4,
+    model: str | None = None,
 ) -> list[int]:
     """
     Pide a Gemini que recomiende productos basándose en el historial.
@@ -148,7 +150,7 @@ Return ONLY a valid JSON array of integer IDs. Example: [1, 5, 12, 3]"""
         try:
             client = genai.Client(api_key=key)
             response = await asyncio.to_thread(client.models.generate_content,
-                model=settings.GEMINI_TEXT_MODEL or "gemini-2.5-flash",
+                model=model or settings.GEMINI_TEXT_MODEL or "gemini-2.5-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",

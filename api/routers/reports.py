@@ -204,7 +204,9 @@ def ai_reports_chat(
     current_user: User = Depends(get_current_user)
 ):
     from core.analytics import authorize
-    authorize(db, current_user, request)
+    from core.plan_features import text_model
+    tenant, _ = authorize(db, current_user, request)
+    plan_model = text_model(tenant.active_subscription.plan if tenant.active_subscription else None)
     # Validar permisos
     if "sales:read" not in get_user_permissions(db, current_user):
         raise HTTPException(status_code=403, detail="No tienes permisos para usar el asistente.")
@@ -230,6 +232,7 @@ def ai_reports_chat(
         ))
         models_to_try = list(dict.fromkeys(
             m for m in [
+                plan_model,
                 settings.GEMINI_TEXT_MODEL,
                 "gemini-2.5-flash",
                 "gemini-2.0-flash",

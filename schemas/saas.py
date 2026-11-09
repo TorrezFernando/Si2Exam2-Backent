@@ -3,19 +3,61 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
+MODEL_PATTERN = r'^gemini-[a-z0-9][a-z0-9.\-]{1,50}$'
+
+
 class SubscriptionPlanSchema(BaseModel):
     id: int
     name: str
     code: str
+    description: Optional[str] = None
     max_branches: int
+    max_users: Optional[int] = None
+    max_products: Optional[int] = None
     has_ai_reports: bool
+    has_ai_shopper: bool = True
+    has_ai_tryon: bool = True
+    ai_text_model: Optional[str] = None
+    ai_image_model: Optional[str] = None
     has_offline_sync: bool
     price: float
     is_active: bool
+    subscribers_count: int = 0
     created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class PlanUpdate(BaseModel):
+    """Campos editables por el Superadmin. Un límite en null significa ilimitado."""
+    name: Optional[str] = Field(None, min_length=2, max_length=80)
+    description: Optional[str] = Field(None, max_length=255)
+    price: Optional[float] = Field(None, ge=0, le=100000, allow_inf_nan=False)
+    max_branches: Optional[int] = Field(None, ge=1, le=1000)
+    max_users: Optional[int] = Field(None, ge=1, le=100000)
+    max_products: Optional[int] = Field(None, ge=1, le=1000000)
+    has_ai_reports: Optional[bool] = None
+    has_ai_shopper: Optional[bool] = None
+    has_ai_tryon: Optional[bool] = None
+    has_offline_sync: Optional[bool] = None
+    ai_text_model: Optional[str] = Field(None, pattern=MODEL_PATTERN)
+    ai_image_model: Optional[str] = Field(None, pattern=MODEL_PATTERN)
+    is_active: Optional[bool] = None
+
+
+class PlanCreate(PlanUpdate):
+    code: str = Field(..., min_length=2, max_length=30, pattern=r'^[a-z0-9][a-z0-9_\-]*$')
+    name: str = Field(..., min_length=2, max_length=80)
+    price: float = Field(..., ge=0, le=100000, allow_inf_nan=False)
+    max_branches: int = Field(..., ge=1, le=1000)
+
+
+class AIModelOptions(BaseModel):
+    text_models: List[str]
+    image_models: List[str]
+    default_text_model: str
+    default_image_model: str
 
 
 class TenantBase(BaseModel):
@@ -71,7 +113,10 @@ class SubscriptionUsage(BaseModel):
     branches_count: int
     branches_limit: int
     users_count: int
+    users_limit: Optional[int] = None
+    staff_count: int = 0
     products_count: int
+    products_limit: Optional[int] = None
     orders_count: int
 
 

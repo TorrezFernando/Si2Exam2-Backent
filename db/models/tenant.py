@@ -61,6 +61,14 @@ class SubscriptionPlan(Base):
     max_branches = Column(Integer, default=2, nullable=False)
     has_ai_reports = Column(Boolean, default=False, nullable=False)
     has_offline_sync = Column(Boolean, default=True, nullable=False)
+    # Límites y funciones editables por el Superadmin. NULL en un límite = ilimitado.
+    description = Column(String(255), nullable=True)
+    max_users = Column(Integer, nullable=True)      # personal de la empresa (no cuenta clientes)
+    max_products = Column(Integer, nullable=True)
+    has_ai_shopper = Column(Boolean, default=True, server_default=true(), nullable=False)  # chat Personal Shopper y recomendaciones
+    has_ai_tryon = Column(Boolean, default=True, server_default=true(), nullable=False)    # probador virtual
+    ai_text_model = Column(String(60), nullable=True)   # NULL = modelo por defecto del servidor
+    ai_image_model = Column(String(60), nullable=True)
     price = Column(Float, default=0.0, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

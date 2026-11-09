@@ -33,6 +33,9 @@ from schemas.saas import (
     MySubscriptionResponse,
     SubscriptionUsage,
     SaaSStatsResponse,
+    PlanCreate,
+    PlanUpdate,
+    AIModelOptions,
 )
 
 router = APIRouter()
@@ -66,17 +69,88 @@ def _build_tenant_detail(db: Session, tenant: Tenant) -> TenantDetailSchema:
 
 # ─── 1. LISTAR PLANES DE SUSCRIPCIÓN (Público / Autenticado) ──────────────────
 
+def _subscribers(db: Session, plan_id: int) -> int:
+    return db.query(Subscription).filter(Subscription.plan_id == plan_id, Subscription.status == "active").count()
+
+
+def _plan_out(db: Session, plan: SubscriptionPlan) -> SubscriptionPlanSchema:
+    out = SubscriptionPlanSchema.model_validate(plan)
+    out.subscribers_count = _subscribers(db, plan.id)
+    return out
+
+
 @router.get("/plans", response_model=List[SubscriptionPlanSchema])
 def list_subscription_plans(
+    include_inactive: bool = False,
     db: Session = Depends(get_db),
 ) -> Any:
-    """Retorna la lista de planes de suscripción disponibles en la plataforma SaaS."""
-    return (
-        db.query(SubscriptionPlan)
-        .filter(SubscriptionPlan.is_active == True)
-        .order_by(SubscriptionPlan.price.asc())
-        .all()
-    )
+    """Planes ofrecidos. `include_inactive` solo tiene efecto en el editor del Superadmin (la UI lo pide allí)."""
+    query = db.query(SubscriptionPlan)
+    if not include_inactive:
+        query = query.filter(SubscriptionPlan.is_active == True)
+    return [_plan_out(db, p) for p in query.order_by(SubscriptionPlan.price.asc()).all()]
+
+
+@router.get("/plans/ai-models", response_model=AIModelOptions)
+def list_ai_models(current_user: User = Depends(require_superadmin)) -> Any:
+    from core.config import settings
+    from core.plan_features import AI_TEXT_MODELS, AI_IMAGE_MODELS
+    return AIModelOptions(text_models=list(AI_TEXT_MODELS), image_models=list(AI_IMAGE_MODELS),
+                          default_text_model=settings.GEMINI_TEXT_MODEL or 'gemini-2.5-flash',
+                          default_image_model=settings.GEMINI_MODEL)
+
+
+REQUIRED_PLAN_FIELDS = {"name", "price", "max_branches", "has_ai_reports", "has_ai_shopper",
+                        "has_ai_tryon", "has_offline_sync", "is_active"}
+
+
+def _apply_plan_changes(db: Session, plan: SubscriptionPlan, changes: dict) -> dict:
+    nulls = sorted(k for k, v in changes.items() if v is None and k in REQUIRED_PLAN_FIELDS)
+    if nulls:
+        raise HTTPException(422, f"Estos campos no pueden quedar vacíos: {', '.join(nulls)}.")
+    if changes.get("is_active") is False and plan.id and _subscribers(db, plan.id):
+        raise HTTPException(409, "No puedes desactivar un plan con empresas suscritas. Cámbialas de plan primero.")
+    previous = {k: getattr(plan, k) for k in changes}
+    for key, value in changes.items():
+        setattr(plan, key, value.strip() if isinstance(value, str) else value)
+    return previous
+
+
+@router.post("/plans", response_model=SubscriptionPlanSchema, status_code=status.HTTP_201_CREATED)
+def create_plan(plan_in: PlanCreate, db: Session = Depends(get_db),
+                current_user: User = Depends(require_superadmin)) -> Any:
+    """Crea un plan nuevo (Superadmin)."""
+    if db.query(SubscriptionPlan).filter(SubscriptionPlan.code == plan_in.code).first():
+        raise HTTPException(409, f"Ya existe un plan con el código '{plan_in.code}'.")
+    plan = SubscriptionPlan(code=plan_in.code, has_ai_reports=False, has_ai_shopper=True, has_ai_tryon=True,
+                            has_offline_sync=True, is_active=True)
+    _apply_plan_changes(db, plan, plan_in.model_dump(exclude={"code"}, exclude_unset=True))
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    log_audit(db, current_user.id, "CREATE", "SUBSCRIPTION_PLAN", str(plan.id),
+              plan_in.model_dump(), tenant_id=None)
+    return _plan_out(db, plan)
+
+
+@router.patch("/plans/{plan_id}", response_model=SubscriptionPlanSchema)
+def update_plan(plan_id: int, plan_in: PlanUpdate, db: Session = Depends(get_db),
+                current_user: User = Depends(require_superadmin)) -> Any:
+    """
+    Modifica límites, funciones de IA, modelos y precio de un plan (Superadmin).
+    Los cambios aplican de inmediato a todas las empresas suscritas; bajar un límite
+    no desactiva registros existentes, solo impide crear nuevos por encima del límite.
+    """
+    plan = db.query(SubscriptionPlan).filter(SubscriptionPlan.id == plan_id).with_for_update().first()
+    if not plan:
+        raise HTTPException(404, "Plan no encontrado.")
+    changes = plan_in.model_dump(exclude_unset=True)
+    previous = _apply_plan_changes(db, plan, changes)
+    db.commit()
+    db.refresh(plan)
+    log_audit(db, current_user.id, "UPDATE", "SUBSCRIPTION_PLAN", str(plan.id),
+              {"before": previous, "after": changes}, tenant_id=None)
+    return _plan_out(db, plan)
 
 
 # ─── 2. MI SUSCRIPCIÓN Y CONSUMO (Empresa actual; separado de Superadmin) ─────
@@ -123,11 +197,15 @@ def get_my_subscription(
     products_count = db.query(Product).filter(Product.tenant_id == tenant.id).count()
     orders_count = db.query(Order).filter(Order.tenant_id == tenant.id).count()
 
+    from core.plan_features import staff_count, product_count
     usage = SubscriptionUsage(
         branches_count=branches_count,
         branches_limit=plan.max_branches if plan else 0,
         users_count=users_count,
-        products_count=products_count,
+        users_limit=plan.max_users if plan else None,
+        staff_count=staff_count(db, tenant.id),
+        products_count=product_count(db, tenant.id),
+        products_limit=plan.max_products if plan else None,
         orders_count=orders_count,
     )
 
