@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, JSON, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, JSON, DateTime, ForeignKey, Text, event
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
@@ -14,7 +14,16 @@ class AuditLog(Base):
     entity_id = Column(String, nullable=True) # ID of the modified entity
     details = Column(JSON, nullable=True) # Old values vs New values
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    # Registro cifrado con la llave del desarrollador (usuario, IP, acción, detalle). Ver core/audit_crypto.py.
+    payload = Column(Text, nullable=True)
 
     tenant = relationship("Tenant")
     user = relationship("User")
+
+
+@event.listens_for(AuditLog, 'before_insert')
+def _seal_audit_log(mapper, connection, target):
+    # Todo registro nuevo, venga de donde venga, se guarda cifrado.
+    from core.audit_crypto import seal
+    seal(target)
 

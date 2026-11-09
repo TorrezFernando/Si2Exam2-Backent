@@ -71,6 +71,9 @@ app = FastAPI(
 # Se registra antes que CORS para que CORS quede por fuera y también cubra las respuestas repetidas.
 from core.idempotency import IdempotencyMiddleware
 app.add_middleware(IdempotencyMiddleware)
+# Bitácora: IP, navegador y usuario de cada solicitud; registra cifradas todas las acciones que modifican datos.
+from core.audit_middleware import AuditContextMiddleware
+app.add_middleware(AuditContextMiddleware)
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
@@ -160,6 +163,21 @@ app.include_router(
     audit.router,
     prefix=f"{settings.API_V1_STR}/audit",
     tags=["📋 Bitácora (Audit)"],
+)
+
+# Backup / Restore de todo el sistema (Superadmin)
+from api.routers import backups as backups_router, report_builder
+app.include_router(
+    backups_router.router,
+    prefix=f"{settings.API_V1_STR}/backups",
+    tags=["💾 Backup / Restore"],
+)
+
+# Constructor de reportes personalizados (columnas, criterios, orden; Excel/PDF/HTML/CSV/email)
+app.include_router(
+    report_builder.router,
+    prefix=f"{settings.API_V1_STR}/report-builder",
+    tags=["🧩 Reportes personalizados"],
 )
 
 # CU-06: Reservas
