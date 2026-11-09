@@ -67,6 +67,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ─── Idempotencia (cola offline del cliente web) ──────────────────────────────
+# Se registra antes que CORS para que CORS quede por fuera y también cubra las respuestas repetidas.
+from core.idempotency import IdempotencyMiddleware
+app.add_middleware(IdempotencyMiddleware)
+
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
