@@ -105,9 +105,17 @@ class ChangePlanRequest(BaseModel):
     plan_code: str = Field(..., description="Código del nuevo plan ('basic', 'professional', 'enterprise')")
 
 
+class BillingInfo(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120, description="Nombre o razón social para la factura")
+    tax_id: Optional[str] = Field(None, max_length=30, description="NIT o CI")
+    email: EmailStr
+
+
 class SubscriptionCheckoutRequest(BaseModel):
     kind: str = Field(..., pattern="^(change_plan|renew)$")
     plan_code: Optional[str] = Field(None, max_length=30)
+    billing: Optional[BillingInfo] = None
+    request_key: Optional[str] = Field(None, min_length=8, max_length=64, description="Id del intento (formularios guardados sin conexión)")
 
 
 class SubscriptionCheckoutResponse(BaseModel):
@@ -120,6 +128,7 @@ class SubscriptionCheckoutResponse(BaseModel):
     payment_url: Optional[str] = None
     plan: Optional[SubscriptionPlanSchema] = None
     error: Optional[str] = None
+    billing: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime] = None
     paid_at: Optional[datetime] = None
     tenant: Optional["TenantDetailSchema"] = None

@@ -488,7 +488,7 @@ def change_tenant_plan(
 def _payment_out(db: Session, row: SubscriptionPayment, tenant: Tenant | None = None) -> SubscriptionCheckoutResponse:
     return SubscriptionCheckoutResponse(
         payment_id=row.id, kind=row.kind, status=row.status, amount=row.amount, currency=row.currency,
-        provider=row.provider, payment_url=row.payment_url if row.status == "pending" else None,
+        provider=row.provider, payment_url=row.payment_url if row.status == "pending" else None, billing=row.billing,
         plan=_plan_out(db, row.plan), error=row.error, created_at=row.created_at, paid_at=row.paid_at,
         tenant=_build_tenant_detail(db, tenant) if tenant is not None else None,
     )
@@ -537,9 +537,18 @@ def start_subscription_checkout(
         plan = _renewal_plan(db, tenant)
 
     amount = float(round(plan.price or 0, 2))
+    billing = checkout_in.billing.model_dump() if checkout_in.billing else None
+    reference = f"SUB-{checkout_in.request_key}" if checkout_in.request_key else f"SUB-{uuid4().hex}"
+    # Un formulario enviado sin conexión se reenvía con el mismo request_key: nunca crea dos cobros.
+    if checkout_in.request_key:
+        existing = db.query(SubscriptionPayment).filter(SubscriptionPayment.reference == reference,
+                                                        SubscriptionPayment.tenant_id == tenant.id).first()
+        if existing:
+            db.commit()
+            return _payment_out(db, existing, tenant if existing.status != "pending" else None)
     if amount <= 0:
         row = SubscriptionPayment(tenant_id=tenant.id, plan_id=plan.id, user_id=current_user.id, kind=checkout_in.kind,
-                                  amount=0.0, provider="Gratis", reference=f"SUB-{uuid4().hex}", status="pending",
+                                  amount=0.0, provider="Gratis", reference=reference, status="pending", billing=billing,
                                   paid_at=datetime.now(timezone.utc))
         db.add(row); db.flush()
         _apply_payment(db, row, tenant, current_user.id)
@@ -553,13 +562,15 @@ def start_subscription_checkout(
         SubscriptionPayment.amount == amount, SubscriptionPayment.payment_url.isnot(None),
     ).order_by(SubscriptionPayment.id.desc()).first()
     if pending:
+        if billing:
+            pending.billing = billing
         db.commit()
         return _payment_out(db, pending)
 
     paypal.ensure_configured()
     row = SubscriptionPayment(tenant_id=tenant.id, plan_id=plan.id, user_id=current_user.id, kind=checkout_in.kind,
                               amount=amount, currency=paypal.CURRENCY, provider="PayPal",
-                              reference=f"SUB-{uuid4().hex}", status="pending")
+                              reference=reference, status="pending", billing=billing)
     db.add(row); db.flush()
     web = settings.PUBLIC_WEB_URL.rstrip("/")
     action = f"Cambio al {plan.name}" if checkout_in.kind == "change_plan" else f"Renovación {plan.name}"

@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float, true
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float, JSON, true
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
@@ -96,6 +96,7 @@ class SubscriptionPayment(Base):
     payment_url = Column(String, nullable=True)
     status = Column(String(20), default="pending", nullable=False)  # pending | applied | failed | cancelled
     error = Column(String(255), nullable=True)
+    billing = Column(JSON, nullable=True)   # nombre/razón social, NIT y correo para la factura
     subscription_id = Column(Integer, ForeignKey("subscriptions.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     paid_at = Column(DateTime(timezone=True), nullable=True)

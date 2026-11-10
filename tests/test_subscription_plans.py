@@ -182,3 +182,22 @@ def test_paid_plan_requires_configured_gateway(shop, monkeypatch):
     monkeypatch.setattr(settings, 'PAYPAL_CLIENT_ID', '')
     response = client(shop, shop.user).post('/saas/my-subscription/checkout', json={'kind': 'change_plan', 'plan_code': 'enterprise'})
     assert response.status_code == 503
+
+
+def test_checkout_form_saved_offline_is_charged_once_with_billing(shop, monkeypatch):
+    from core import paypal
+    from db.models import SubscriptionPayment
+    prepare(shop)
+    monkeypatch.setattr(paypal, 'ensure_configured', lambda: None)
+    created = []
+    monkeypatch.setattr(paypal, 'create_checkout', lambda ref, *a: created.append(ref) or (f'PP-{ref}', 'https://www.sandbox.paypal.com/x'))
+    api = client(shop, shop.user)
+    form = {'kind': 'change_plan', 'plan_code': 'enterprise', 'request_key': 'plan-form-0001',
+            'billing': {'name': 'Boutique SRL', 'tax_id': '1234567', 'email': 'facturas@boutique.com'}}
+    first = api.post('/saas/my-subscription/checkout', json=form).json()
+    again = api.post('/saas/my-subscription/checkout', json=form).json()  # reenvío al volver la conexión
+    assert first['payment_id'] == again['payment_id'] and len(created) == 1
+    assert first['billing'] == {'name': 'Boutique SRL', 'tax_id': '1234567', 'email': 'facturas@boutique.com'}
+    assert shop.db.query(SubscriptionPayment).count() == 1
+    bad = dict(form, request_key='plan-form-0002', billing={'name': 'X', 'email': 'no-es-correo'})
+    assert api.post('/saas/my-subscription/checkout', json=bad).status_code == 422
