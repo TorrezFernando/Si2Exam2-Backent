@@ -21,10 +21,13 @@ SEALED = 'CIFRADO'
 
 
 def _key() -> bytes:
-    if settings.AUDIT_LOG_KEY:
-        return settings.AUDIT_LOG_KEY.encode()
-    # Sin llave dedicada se deriva una de SECRET_KEY (también fuera de la base de datos).
-    return base64.urlsafe_b64encode(hashlib.sha256(f'audit-log:{settings.SECRET_KEY}'.encode()).digest())
+    secret = settings.AUDIT_LOG_KEY or settings.SECRET_KEY
+    try:
+        Fernet(secret.encode())  # ya es una llave Fernet válida
+        return secret.encode()
+    except (ValueError, TypeError):
+        # Contraseña del desarrollador (p. ej. 'bitacora'): se convierte en una llave de 32 bytes.
+        return base64.urlsafe_b64encode(hashlib.sha256(f'audit-log:{secret}'.encode()).digest())
 
 
 def _fernet() -> Fernet:

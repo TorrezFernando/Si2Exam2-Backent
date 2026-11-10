@@ -42,9 +42,9 @@ class Settings(BaseSettings):
 
     # Set only a Libelula-issued TEST appkey for the academic deployment.
     LIBELULA_TEST_APPKEY: str = ""
-    # Llave del desarrollador para cifrar la bitácora (Fernet). Generar con:
-    # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    AUDIT_LOG_KEY: str = ""
+    # Contraseña del desarrollador para cifrar la bitácora (se convierte en llave Fernet con SHA-256).
+    # Puede reemplazarse por AUDIT_LOG_KEY en el entorno; cambiarla deja ilegibles los registros anteriores.
+    AUDIT_LOG_KEY: str = "bitacora"
     BACKUP_DIR: str = "backups"  # copias de seguridad del sistema (volumen persistente en la VM)
     # Correo saliente para enviar reportes (p. ej. Gmail: smtp.gmail.com, 587, contraseña de aplicación)
     SMTP_HOST: str = ""

@@ -40,3 +40,11 @@ def test_client_ip_prefers_forwarded_header():
     scope = {'headers': [(b'x-forwarded-for', b'200.87.1.2, 10.0.0.1')], 'client': ('127.0.0.1', 5000)}
     assert client_ip(scope) == '200.87.1.2'
     assert client_ip({'headers': [], 'client': ('10.1.1.1', 1)}) == '10.1.1.1'
+
+
+def test_developer_password_bitacora_is_the_default_key(monkeypatch):
+    assert audit_crypto.settings.AUDIT_LOG_KEY == 'bitacora'
+    token = audit_crypto.encrypt({'action': 'LOGIN'})
+    assert audit_crypto.decrypt(token) == {'action': 'LOGIN'}
+    monkeypatch.setattr(audit_crypto.settings, 'AUDIT_LOG_KEY', 'otra-clave')
+    assert audit_crypto.decrypt(token) is None  # otra contraseña no puede leerla
