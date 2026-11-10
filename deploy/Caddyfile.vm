@@ -1,3 +1,11 @@
+{
+    servers {
+        # La web llega a través de Cloud Run (nginx), que ya envía X-Forwarded-For con la IP del cliente.
+        # Se conserva esa cabecera para que la bitácora registre la IP real y no la del servidor intermedio.
+        trusted_proxies static 0.0.0.0/0 ::/0
+    }
+}
+
 {$API_DOMAIN} {
     encode gzip
     reverse_proxy backend:8000

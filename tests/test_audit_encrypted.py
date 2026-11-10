@@ -23,7 +23,10 @@ def test_log_is_unreadable_in_database_but_readable_through_the_system(shop):
     shop.user.role.permissions.append(Permission(name='audit:read')); shop.db.commit()
     api = client(shop, shop.user)
     api.app.include_router(audit.router, prefix='/audit')
-    entry = api.get('/audit').json()[0]
+    # Sin la contraseña del desarrollador no se muestra nada, aunque el usuario tenga permiso
+    assert api.get('/audit').status_code == 403
+    assert api.get('/audit', headers={'X-Audit-Key': 'incorrecta'}).status_code == 403
+    entry = api.get('/audit', headers={'X-Audit-Key': 'bitacora'}).json()[0]
     assert (entry['action'], entry['entity_type'], entry['entity_id']) == ('DELETE', 'PRODUCT', '7')
     assert entry['ip'] == '181.115.10.20' and entry['user_id'] == shop.user.id
     assert entry['user_email'] == shop.user.email and entry['details'] == {'nombre': 'Camisa'}

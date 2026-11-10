@@ -1,10 +1,10 @@
 from typing import Any, List, Optional
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from api.deps import get_db, require_permission
 from core.access import is_global_admin
-from core.audit_crypto import open_row
+from core.audit_crypto import open_row, verify_password
 from db.models.audit import AuditLog
 from db.models.user import User
 from schemas.audit import AuditLogSchema
@@ -25,11 +25,14 @@ def get_audit_logs(
     action: Optional[str] = None,
     entity_type: Optional[str] = None,
     ip: Optional[str] = None,
+    x_audit_key: Optional[str] = Header(None),
 ) -> Any:
     """
     Bitácora confidencial: los registros están cifrados en la base de datos y solo se descifran aquí,
     con la llave del desarrollador del servidor, para usuarios con permiso audit:read y dentro de su ámbito.
     """
+    if not verify_password(x_audit_key):
+        raise HTTPException(403, "LLAVE_BITACORA: ingresa la contraseña del desarrollador para ver la bitácora.")
     query = db.query(AuditLog)
     global_admin = is_global_admin(current_user)
     if not global_admin:

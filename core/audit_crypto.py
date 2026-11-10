@@ -30,6 +30,13 @@ def _key() -> bytes:
         return base64.urlsafe_b64encode(hashlib.sha256(f'audit-log:{secret}'.encode()).digest())
 
 
+def verify_password(password: str | None) -> bool:
+    """La bitácora solo se muestra a quien conoce la contraseña del desarrollador."""
+    import hmac
+    expected = settings.AUDIT_LOG_KEY or settings.SECRET_KEY
+    return bool(password) and hmac.compare_digest(password.encode(), expected.encode())
+
+
 def _fernet() -> Fernet:
     return Fernet(_key())
 
